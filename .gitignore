@@ -1,0 +1,14 @@
+.DS_Store
+build/
+dist/
+release/
+Engine/
+Downloads/
+cx-source/
+cx-manual/
+engine-build/
+cx-builder/
+wine-dxmt-howto/
+*.log
+*.dmg
+*.zip

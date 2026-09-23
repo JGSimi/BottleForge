@@ -222,6 +222,7 @@ final class BottleStore: ObservableObject {
             .appendingPathComponent("Library/BottleForge")
     }
     private var bottlesRoot: URL { supportRoot.appendingPathComponent("Bottles") }
+    private var logsRoot: URL { supportRoot.appendingPathComponent("Logs") }
     private var projectRoot: URL {
         fm.homeDirectoryForCurrentUser.appendingPathComponent("Developer/BottleForge")
     }
@@ -241,6 +242,7 @@ final class BottleStore: ObservableObject {
 
     init() {
         try? fm.createDirectory(at: bottlesRoot, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: logsRoot, withIntermediateDirectories: true)
         load()
         refreshRosettaStatus()
     }
@@ -404,7 +406,131 @@ final class BottleStore: ObservableObject {
     }
 
     func runInstalledApp(_ app: InstalledApp, in bottle: Bottle) {
+        if app.id.hasPrefix("steam:") {
+            let appID = String(app.id.dropFirst("steam:".count))
+            monitorSteamGame(appID: appID, name: app.name, bottle: bottle)
+        }
+
         launch(app.executable, arguments: app.arguments, displayName: app.name, in: bottle)
+    }
+
+    private func monitorSteamGame(appID: String, name: String, bottle: Bottle) {
+        let steamRoots = [
+            prefixURL(bottle).appendingPathComponent("drive_c/Program Files (x86)/Steam"),
+            prefixURL(bottle).appendingPathComponent("drive_c/Program Files/Steam")
+        ]
+        guard let steamRoot = steamRoots.first(where: { fm.fileExists(atPath: $0.path) }) else { return }
+
+        let processLog = steamRoot.appendingPathComponent("logs/gameprocess_log.txt")
+        let baselineSize = (try? Data(contentsOf: processLog).count) ?? 0
+        let diagnosticsRoot = logsRoot
+        let bottleName = bottle.name
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let launchDeadline = Date().addingTimeInterval(180)
+            let monitorDeadline = Date().addingTimeInterval(6 * 60 * 60)
+            var mainPID: String?
+            var latestChunk = ""
+
+            while Date() < monitorDeadline {
+                Thread.sleep(forTimeInterval: 2)
+
+                guard let data = try? Data(contentsOf: processLog) else { continue }
+                let offset = data.count >= baselineSize ? baselineSize : 0
+                latestChunk = String(data: data.suffix(from: offset), encoding: .utf8) ?? ""
+
+                let lines = latestChunk.components(separatedBy: .newlines)
+                let addMarker = "AppID \(appID) adding PID "
+
+                if mainPID == nil {
+                    for line in lines where line.contains(addMarker) {
+                        let lower = line.lowercased()
+                        if lower.contains("crashhandler") || lower.contains("steamerrorreporter") {
+                            continue
+                        }
+
+                        if let range = line.range(of: addMarker) {
+                            let tail = line[range.upperBound...]
+                            mainPID = tail.split(separator: " ").first.map(String.init)
+                            break
+                        }
+                    }
+                }
+
+                if let mainPID {
+                    let exitMarker = "AppID \(appID) no longer tracking PID \(mainPID), exit code "
+                    if let exitLine = lines.last(where: { $0.contains(exitMarker) }),
+                       let range = exitLine.range(of: exitMarker) {
+                        let rawCode = exitLine[range.upperBound...]
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        let code = Int(rawCode) ?? -1
+
+                        if code == 0 {
+                            DispatchQueue.main.async {
+                                self?.status = "\(name) finalizado"
+                            }
+                        } else {
+                            let fileName = Self.writeSteamDiagnostic(
+                                appID: appID,
+                                name: name,
+                                bottleName: bottleName,
+                                exitCode: code,
+                                details: latestChunk,
+                                directory: diagnosticsRoot
+                            )
+                            DispatchQueue.main.async {
+                                self?.status = "\(name) encerrou com código \(code) · Diagnóstico: \(fileName)"
+                            }
+                        }
+                        return
+                    }
+                } else if Date() > launchDeadline {
+                    let fileName = Self.writeSteamDiagnostic(
+                        appID: appID,
+                        name: name,
+                        bottleName: bottleName,
+                        exitCode: nil,
+                        details: latestChunk,
+                        directory: diagnosticsRoot
+                    )
+                    DispatchQueue.main.async {
+                        self?.status = "\(name) não iniciou · Diagnóstico: \(fileName)"
+                    }
+                    return
+                }
+            }
+        }
+    }
+
+    nonisolated private static func writeSteamDiagnostic(
+        appID: String,
+        name: String,
+        bottleName: String,
+        exitCode: Int?,
+        details: String,
+        directory: URL
+    ) -> String {
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let fileName = "steam-\(appID)-\(timestamp).log"
+        let destination = directory.appendingPathComponent(fileName)
+        let exitDescription = exitCode.map(String.init) ?? "processo não iniciado"
+
+        let report = """
+        BottleForge Steam Diagnostic
+        Date: \(ISO8601DateFormatter().string(from: Date()))
+        Bottle: \(bottleName)
+        App: \(name)
+        AppID: \(appID)
+        Exit: \(exitDescription)
+
+        --- Steam gameprocess_log ---
+        \(details)
+        """
+
+        try? report.write(to: destination, atomically: true, encoding: .utf8)
+        return fileName
     }
 
     private func launch(_ executable: URL, arguments: [String], displayName: String, in bottle: Bottle) {

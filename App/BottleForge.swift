@@ -214,6 +214,8 @@ final class BottleStore: ObservableObject {
     @Published var bottles: [Bottle] = []
     @Published var status = "Pronto"
     @Published var busy = false
+    @Published var rosettaRequired = false
+    @Published var rosettaInstalling = false
     private let fm = FileManager.default
     private var supportRoot: URL {
         fm.homeDirectoryForCurrentUser
@@ -241,6 +243,112 @@ final class BottleStore: ObservableObject {
     init() {
         try? fm.createDirectory(at: bottlesRoot, withIntermediateDirectories: true)
         load()
+        refreshRosettaStatus()
+    }
+
+    func refreshRosettaStatus() {
+#if arch(arm64)
+        DispatchQueue.global(qos: .utility).async {
+            let available = Self.rosettaIsAvailable()
+            DispatchQueue.main.async {
+                self.rosettaRequired = !available
+                if !available {
+                    self.status = "Rosetta 2 é necessária para executar apps Windows"
+                }
+            }
+        }
+#else
+        rosettaRequired = false
+#endif
+    }
+
+    func installRosetta() {
+#if arch(arm64)
+        guard !rosettaInstalling else { return }
+
+        rosettaInstalling = true
+        busy = true
+        status = "Instalando Rosetta 2…"
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = [
+                "-e",
+                #"do shell script "/usr/sbin/softwareupdate --install-rosetta --agree-to-license" with administrator privileges"#
+            ]
+            process.standardOutput = FileHandle.nullDevice
+            let errorPipe = Pipe()
+            process.standardError = errorPipe
+
+            var launchError: Error?
+            do {
+                try process.run()
+                process.waitUntilExit()
+            } catch {
+                launchError = error
+            }
+
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            let errorText = String(data: errorData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let available = Self.rosettaIsAvailable()
+            let exitCode = process.isRunning ? Int32(-1) : process.terminationStatus
+
+            DispatchQueue.main.async {
+                self.rosettaInstalling = false
+                self.busy = false
+                self.rosettaRequired = !available
+
+                if available {
+                    self.status = "Rosetta 2 instalada — BottleForge pronto"
+                } else if let launchError {
+                    self.status = "Não foi possível instalar Rosetta 2: \(launchError.localizedDescription)"
+                } else if !errorText.isEmpty {
+                    self.status = "Rosetta 2 não foi instalada: \(errorText)"
+                } else {
+                    self.status = "Rosetta 2 não foi instalada (código \(exitCode))"
+                }
+            }
+        }
+#else
+        rosettaRequired = false
+#endif
+    }
+
+    private func ensureRosettaAvailable() -> Bool {
+#if arch(arm64)
+        if Self.rosettaIsAvailable() {
+            rosettaRequired = false
+            return true
+        }
+
+        rosettaRequired = true
+        status = "Rosetta 2 é necessária para executar apps Windows"
+        return false
+#else
+        return true
+#endif
+    }
+
+    nonisolated private static func rosettaIsAvailable() -> Bool {
+#if arch(arm64)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/arch")
+        process.arguments = ["-x86_64", "/usr/bin/true"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+#else
+        return true
+#endif
     }
 
     func load() {
@@ -257,6 +365,8 @@ final class BottleStore: ObservableObject {
     }
 
     func create(name: String, renderer: Renderer, msync: Bool) {
+        guard ensureRosettaAvailable() else { return }
+
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         guard let wineboot = winebootURL(for: renderer) else {
@@ -298,6 +408,8 @@ final class BottleStore: ObservableObject {
     }
 
     private func launch(_ executable: URL, arguments: [String], displayName: String, in bottle: Bottle) {
+        guard ensureRosettaAvailable() else { return }
+
         guard let wine = wineURL(for: bottle.renderer) else {
             status = "Engine Wine não encontrada"
             return
@@ -502,6 +614,7 @@ final class BottleStore: ObservableObject {
     }
 
     func wineConfig(_ bottle: Bottle) {
+        guard ensureRosettaAvailable() else { return }
         guard let winecfg = winecfgURL(for: bottle.renderer) else { status = "winecfg não encontrado"; return }
         runProcess(winecfg, args: [], bottle: bottle) { _ in }
     }
@@ -699,6 +812,19 @@ struct ContentView: View {
         .sheet(isPresented: $showingUpdate) {
             UpdateView()
                 .environmentObject(updater)
+        }
+        .alert("Componente de compatibilidade necessário", isPresented: $store.rosettaRequired) {
+            Button("Instalar Rosetta 2") {
+                store.installRosetta()
+            }
+            .disabled(store.rosettaInstalling)
+
+            Button("Agora não", role: .cancel) {}
+        } message: {
+            Text(
+                "O BottleForge usa um runtime Windows x86_64. Neste Mac com Apple Silicon, " +
+                "é necessário instalar o Rosetta 2 da Apple para executar jogos e aplicativos Windows."
+            )
         }
         .onAppear {
             if selectedBottle == nil {

@@ -232,9 +232,8 @@ final class BottleStore: ObservableObject {
         }
         return projectRoot.appendingPathComponent("Engine")
     }
-    private var dxmtEngineRoot: URL { engineBaseRoot.appendingPathComponent("wine-11.17") }
-    private var wineD3DEngineRoot: URL { engineBaseRoot.appendingPathComponent("wine-11.17-wined3d") }
-    private var dxmtRoot: URL { engineBaseRoot.appendingPathComponent("dxmt-0.80") }
+    private var dxmtEngineRoot: URL { engineBaseRoot.appendingPathComponent("wine-11.8-dxmt") }
+    private var wineD3DEngineRoot: URL { engineBaseRoot.appendingPathComponent("wine-11.8-wined3d") }
 
     private func engineRoot(for renderer: Renderer) -> URL {
         renderer == .dxmt ? dxmtEngineRoot : wineD3DEngineRoot
@@ -394,7 +393,6 @@ final class BottleStore: ObservableObject {
         runProcess(wineboot, args: ["--init"], bottle: bottle) { code in
             self.busy = false
             self.status = code == 0 ? "\(trimmed) criado" : "Wineboot falhou (\(code))"
-            if code == 0 { self.installDXMTIntoPrefixIfNeeded(bottle) }
         }
     }
     func runExecutable(_ url: URL, in bottle: Bottle) {
@@ -416,8 +414,6 @@ final class BottleStore: ObservableObject {
             status = "Engine Wine não encontrada"
             return
         }
-
-        installDXMTIntoPrefixIfNeeded(bottle)
 
         if isSteamExecutable(executable) {
             launchSteam(executable, arguments: arguments, displayName: displayName, wine: wine, bottle: bottle)
@@ -446,40 +442,19 @@ final class BottleStore: ObservableObject {
             terminateRunningSteam(in: bottle)
         }
 
-        guard prepareSteamCompatibility(in: bottle) else {
-            status = "Não foi possível preparar a compatibilidade da Steam"
-            return
-        }
-
+        restoreSteamWebHelperIfNeeded(in: bottle)
         cleanSteamChromiumLocks(in: bottle)
 
-        let size = steamVirtualDesktopSize()
-        let windowsExecutable = windowsPath(for: executable, in: bottle)
         let steamArgs = [
-            "-no-cef-sandbox",
-            "-cef-single-process",
-            "-noverifyfiles"
+            "-cef-disable-gpu",
+            "-no-cef-sandbox"
         ] + arguments
-
-        let overrides: String
-        if bottle.renderer == .dxmt {
-            overrides = "dxgi,d3d11,d3d10core=n,b;bcrypt=b;ncrypt=b;gameoverlayrenderer,gameoverlayrenderer64=d"
-        } else {
-            overrides = "bcrypt=b;ncrypt=b;gameoverlayrenderer,gameoverlayrenderer64=d"
-        }
 
         status = "Abrindo \(displayName)…"
         runProcess(
             wine,
-            args: [
-                "explorer.exe",
-                "/desktop=BottleForgeSteam,\(size)",
-                windowsExecutable
-            ] + steamArgs,
-            bottle: bottle,
-            environmentOverrides: [
-                "WINEDLLOVERRIDES": overrides
-            ]
+            args: [executable.path] + steamArgs,
+            bottle: bottle
         ) { code in
             self.status = code == 0 ? "\(displayName) finalizado" : "\(displayName) saiu com código \(code)"
         }
@@ -503,9 +478,7 @@ final class BottleStore: ObservableObject {
         }
     }
 
-    private func prepareSteamCompatibility(in bottle: Bottle) -> Bool {
-        guard let wrapper = steamCompatWrapperURL() else { return false }
-
+    private func restoreSteamWebHelperIfNeeded(in bottle: Bottle) {
         let steamDir = prefixURL(bottle)
             .appendingPathComponent("drive_c/Program Files (x86)/Steam")
         let cefRoot = steamDir.appendingPathComponent("bin/cef")
@@ -514,60 +487,22 @@ final class BottleStore: ObservableObject {
             at: cefRoot,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
-        ) else { return false }
-
-        var patched = false
+        ) else { return }
 
         for cefDir in cefDirs where cefDir.lastPathComponent.lowercased().hasPrefix("cef.win") {
             let helper = cefDir.appendingPathComponent("steamwebhelper.exe")
             let real = cefDir.appendingPathComponent("steamwebhelper_real.exe")
 
-            if fm.fileExists(atPath: helper.path),
-               let size = try? helper.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-               size > 1_000_000 {
-                try? fm.removeItem(at: real)
-                do {
-                    try fm.moveItem(at: helper, to: real)
-                } catch {
-                    continue
-                }
-            }
-
             guard fm.fileExists(atPath: real.path) else { continue }
 
+            let helperSize = (try? helper.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            let realSize = (try? real.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+
+            guard helperSize < 1_000_000, realSize > 1_000_000 else { continue }
+
             try? fm.removeItem(at: helper)
-            do {
-                try fm.copyItem(at: wrapper, to: helper)
-                patched = true
-            } catch {
-                continue
-            }
+            try? fm.copyItem(at: real, to: helper)
         }
-
-        let steamCfg = steamDir.appendingPathComponent("steam.cfg")
-        if let text = try? String(contentsOf: steamCfg, encoding: .utf8),
-           text.trimmingCharacters(in: .whitespacesAndNewlines) == "BootStrapperInhibitAll=enable" {
-            try? fm.removeItem(at: steamCfg)
-        }
-
-        let caSource = URL(fileURLWithPath: "/etc/ssl/cert.pem")
-        let caDestination = prefixURL(bottle).appendingPathComponent("drive_c/windows/cacert.pem")
-        if fm.fileExists(atPath: caSource.path) {
-            try? fm.removeItem(at: caDestination)
-            try? fm.copyItem(at: caSource, to: caDestination)
-        }
-
-        return patched
-    }
-
-    private func steamCompatWrapperURL() -> URL? {
-        if let resources = Bundle.main.resourceURL {
-            let bundled = resources.appendingPathComponent("SteamCompat/steamwebhelper-wrapper.exe")
-            if fm.fileExists(atPath: bundled.path) { return bundled }
-        }
-
-        let development = projectRoot.appendingPathComponent("build/steamwebhelper-wrapper.exe")
-        return fm.fileExists(atPath: development.path) ? development : nil
     }
 
     private func cleanSteamChromiumLocks(in bottle: Bottle) {
@@ -602,19 +537,6 @@ final class BottleStore: ObservableObject {
         }
     }
 
-    private func steamVirtualDesktopSize() -> String {
-        guard let screen = NSScreen.main else { return "1440x900" }
-        let frame = screen.visibleFrame
-        return "\(max(800, Int(frame.width)))x\(max(600, Int(frame.height)))"
-    }
-
-    private func windowsPath(for executable: URL, in bottle: Bottle) -> String {
-        let driveC = prefixURL(bottle).appendingPathComponent("drive_c").path + "/"
-        guard executable.path.hasPrefix(driveC) else { return executable.path }
-        let relative = String(executable.path.dropFirst(driveC.count))
-        return "C:\\" + relative.replacingOccurrences(of: "/", with: "\\")
-    }
-
     func wineConfig(_ bottle: Bottle) {
         guard ensureRosettaAvailable() else { return }
         guard let winecfg = winecfgURL(for: bottle.renderer) else { status = "winecfg não encontrado"; return }
@@ -639,7 +561,7 @@ final class BottleStore: ObservableObject {
         status = "\(bottle.name) removido"
     }
     var engineDescription: String {
-        "Wine 11.17 · DXMT 0.80 / WineD3D"
+        "Wine 11.8 Staging · DXMT 0.80 / WineD3D"
     }
 
     private func wineURL(for renderer: Renderer) -> URL? {
@@ -707,6 +629,7 @@ final class BottleStore: ObservableObject {
 
         if bottle.renderer == .dxmt {
             env["WINEDLLOVERRIDES"] = "dxgi,d3d11,d3d10core,winemetal=builtin"
+            env["WINE_DO_NOT_CREATE_DXGI_DEVICE_MANAGER"] = "1"
         } else {
             env["WINEDLLOVERRIDES"] = ""
         }
@@ -753,15 +676,6 @@ final class BottleStore: ObservableObject {
         }
     }
 
-    private func installDXMTIntoPrefixIfNeeded(_ bottle: Bottle) {
-        guard bottle.renderer == .dxmt else { return }
-        let src = dxmtRoot.appendingPathComponent("x86_64-windows/winemetal.dll")
-        let system32 = prefixURL(bottle).appendingPathComponent("drive_c/windows/system32")
-        let dst = system32.appendingPathComponent("winemetal.dll")
-        guard fm.fileExists(atPath: src.path), !fm.fileExists(atPath: dst.path) else { return }
-        try? fm.createDirectory(at: system32, withIntermediateDirectories: true)
-        try? fm.copyItem(at: src, to: dst)
-    }
 }
 
 struct ContentView: View {

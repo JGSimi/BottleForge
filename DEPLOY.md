@@ -16,8 +16,10 @@ O script valida o Swift, envia a `main`, cria a tag e envia a tag ao GitHub.
 A tag dispara `.github/workflows/release.yml`.
 ## O que o GitHub Actions faz
 
-- baixa a release-base que contém os runtimes Wine/DXMT;
-- extrai os runtimes sem armazená-los no Git;
+- executa `Scripts/bootstrap-engines.sh`;
+- baixa Wine 11.8 Staging e DXMT 0.80 de fontes upstream com SHA-256 fixado;
+- monta a engine DXMT com o adapter winemac necessário para superfícies Metal;
+- monta uma segunda engine WineD3D sem o overlay DXMT;
 - compila o BottleForge para Apple Silicon;
 - injeta a tag em `BottleForgeReleaseTag` no `Info.plist`;
 - assina a build de forma ad-hoc;
@@ -25,8 +27,8 @@ A tag dispara `.github/workflows/release.yml`.
 - gera `SHA256SUMS.txt`;
 - publica a GitHub Release e seus assets.
 
-Enquanto os runtimes não forem versionados separadamente, a release-base é
-`v0.1.0-alpha`, configurada em `RUNTIME_SOURCE_TAG` no workflow.
+Os runtimes não ficam armazenados no Git e a release não depende mais de uma
+release antiga do próprio BottleForge para bootstrap.
 ## Atualização dentro do app
 
 O BottleForge consulta as Releases do repositório ao iniciar e quando volta

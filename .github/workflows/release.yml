@@ -14,9 +14,6 @@ on:
 permissions:
   contents: write
 
-env:
-  RUNTIME_SOURCE_TAG: v0.1.0-alpha
-
 jobs:
   release:
     runs-on: macos-14
@@ -37,25 +34,11 @@ jobs:
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Bootstrap bundled runtimes
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Bootstrap engines
         shell: bash
         run: |
-          mkdir -p Engine /tmp/bottleforge-runtime /tmp/bottleforge-mount
-          gh release download "$RUNTIME_SOURCE_TAG"             --repo "$GITHUB_REPOSITORY"             --pattern "BottleForge-*-macOS.dmg"             --dir /tmp/bottleforge-runtime
-          DMG="$(find /tmp/bottleforge-runtime -name '*.dmg' -print -quit)"
-          test -n "$DMG"
-          hdiutil attach "$DMG"             -nobrowse             -readonly             -mountpoint /tmp/bottleforge-mount
-          ditto             /tmp/bottleforge-mount/BottleForge.app/Contents/Resources/Engines             "$GITHUB_WORKSPACE/Engine"
-          hdiutil detach /tmp/bottleforge-mount -quiet
-
-      - name: Install Steam compatibility compiler
-        shell: bash
-        run: |
-          if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
-            brew install mingw-w64
-          fi
+          chmod +x Scripts/*.sh
+          ./Scripts/bootstrap-engines.sh
 
       - name: Build app
         shell: bash

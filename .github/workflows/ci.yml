@@ -19,6 +19,7 @@ jobs:
       - name: Validate scripts
         run: |
           chmod +x Scripts/*.sh
+          zsh -n Scripts/bootstrap-engines.sh
           zsh -n Scripts/build-app.sh
           zsh -n Scripts/package-dmg.sh
           zsh -n Scripts/release.sh

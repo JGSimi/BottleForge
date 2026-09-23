@@ -33,7 +33,7 @@ Use esse comando somente para o BottleForge baixado da página oficial de Releas
 ## Recursos atuais
 
 - Bottles isoladas e persistentes
-- Wine 11.17 Staging
+- Wine 11.8 Staging
 - DXMT 0.80 para Direct3D 10/11 -> Metal
 - WineD3D como renderer alternativo
 - Executar instaladores e programas `.exe`
@@ -62,7 +62,7 @@ está documentado em `DEPLOY.md` e pode ser disparado com:
 
 ## Estado do projeto
 
-A engine custom baseada no source aberto do CrossOver/Wine, incluindo suporte a MSync, ainda está em desenvolvimento. A alpha usa Wine 11.17 Staging como engine bootstrap.
+A engine DXMT usa Wine 11.8 Staging como base, com o adapter winemac necessário para criar superfícies Metal e DXMT 0.80 oficial. O renderer WineD3D usa a mesma base Wine sem o overlay DXMT.
 
 ## Terceiros
 

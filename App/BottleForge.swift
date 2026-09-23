@@ -59,7 +59,7 @@ private enum InstalledAppScanner {
                 detail: "Launcher",
                 icon: "gamecontroller.fill",
                 executable: steam,
-                arguments: []
+                arguments: ["-cef-disable-gpu"]
             ))
             scanSteamGames(steam: steam, add: add)
         }
@@ -102,7 +102,7 @@ private enum InstalledAppScanner {
                 detail: "Steam · Jogo",
                 icon: "play.rectangle.fill",
                 executable: steam,
-                arguments: ["-applaunch", appID]
+                arguments: ["-cef-disable-gpu", "-applaunch", appID]
             ))
         }
     }

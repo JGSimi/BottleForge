@@ -159,7 +159,18 @@ final class UpdateManager: ObservableObject {
             do {
                 let dmg = try await downloadAndVerify(release)
                 statusMessage = "Preparando instalação de \(release.tag)…"
-                try startInstaller(dmg: dmg, release: release)
+                let status = try await startInstaller(dmg: dmg, release: release)
+
+                if status != 0 {
+                    isDownloading = false
+                    statusMessage = nil
+
+                    if status == 22 {
+                        errorMessage = "Espaço insuficiente para concluir a atualização."
+                    } else {
+                        errorMessage = "A instalação não pôde ser concluída. Código \(status)."
+                    }
+                }
             } catch {
                 isDownloading = false
                 errorMessage = "Falha na atualização: \(error.localizedDescription)"
@@ -245,7 +256,7 @@ final class UpdateManager: ObservableObject {
         return destination
     }
 
-    private func startInstaller(dmg: URL, release: UpdateRelease) throws {
+    private func startInstaller(dmg: URL, release: UpdateRelease) async throws -> Int32 {
         let target = Bundle.main.bundleURL
         let parent = target.deletingLastPathComponent()
 
@@ -282,21 +293,17 @@ final class UpdateManager: ObservableObject {
             process.standardError = handle
         }
 
-        process.terminationHandler = { [weak self] process in
-            guard process.terminationStatus != 0 else { return }
-            Task { @MainActor in
-                self?.isDownloading = false
-                self?.statusMessage = nil
+        return try await withCheckedThrowingContinuation { continuation in
+            process.terminationHandler = { process in
+                continuation.resume(returning: process.terminationStatus)
+            }
 
-                if process.terminationStatus == 22 {
-                    self?.errorMessage = "Espaço insuficiente para concluir a atualização."
-                } else {
-                    self?.errorMessage = "A instalação não pôde ser concluída. Código \(process.terminationStatus)."
-                }
+            do {
+                try process.run()
+            } catch {
+                continuation.resume(throwing: error)
             }
         }
-
-        try process.run()
     }
 
     nonisolated private static func sha256(of file: URL) throws -> String {

@@ -243,6 +243,7 @@ final class BottleStore: ObservableObject {
     init() {
         try? fm.createDirectory(at: bottlesRoot, withIntermediateDirectories: true)
         try? fm.createDirectory(at: logsRoot, withIntermediateDirectories: true)
+        clearStaleSteamBootstrapGuards()
         load()
         refreshRosettaStatus()
     }
@@ -649,12 +650,14 @@ final class BottleStore: ObservableObject {
             terminateRunningSteam(in: bottle)
         }
 
-        restoreSteamWebHelperIfNeeded(in: bottle)
-        cleanSteamChromiumLocks(in: bottle)
+        guard prepareSteamCEFCompatibility(in: bottle) else {
+            status = "Não foi possível preparar a interface da Steam"
+            return
+        }
 
         let steamArgs = [
-            "-cef-disable-gpu",
-            "-no-cef-sandbox"
+            "-no-cef-sandbox",
+            "-noverifyfiles"
         ] + (profile?.launchArguments ?? []) + arguments
 
         var environmentOverrides: [String: String] = [:]
@@ -671,6 +674,8 @@ final class BottleStore: ObservableObject {
         ) { code in
             self.status = code == 0 ? "\(displayName) finalizado" : "\(displayName) saiu com código \(code)"
         }
+
+        scheduleSteamBootstrapGuardRemoval(in: bottle)
     }
 
     private func terminateRunningSteam(in bottle: Bottle) {
@@ -691,7 +696,9 @@ final class BottleStore: ObservableObject {
         }
     }
 
-    private func restoreSteamWebHelperIfNeeded(in bottle: Bottle) {
+    private func prepareSteamCEFCompatibility(in bottle: Bottle) -> Bool {
+        guard let wrapper = steamCompatWrapperURL() else { return false }
+
         let steamDir = prefixURL(bottle)
             .appendingPathComponent("drive_c/Program Files (x86)/Steam")
         let cefRoot = steamDir.appendingPathComponent("bin/cef")
@@ -700,21 +707,110 @@ final class BottleStore: ObservableObject {
             at: cefRoot,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
-        ) else { return }
+        ) else { return false }
+
+        var patched = false
+        var refreshedOriginal = false
 
         for cefDir in cefDirs where cefDir.lastPathComponent.lowercased().hasPrefix("cef.win") {
             let helper = cefDir.appendingPathComponent("steamwebhelper.exe")
             let real = cefDir.appendingPathComponent("steamwebhelper_real.exe")
+            let helperSize = (try? helper.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+
+            if helperSize > 1_000_000 {
+                try? fm.removeItem(at: real)
+                do {
+                    try fm.moveItem(at: helper, to: real)
+                    refreshedOriginal = true
+                } catch {
+                    continue
+                }
+            }
 
             guard fm.fileExists(atPath: real.path) else { continue }
 
-            let helperSize = (try? helper.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            let realSize = (try? real.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-
-            guard helperSize < 1_000_000, realSize > 1_000_000 else { continue }
-
             try? fm.removeItem(at: helper)
-            try? fm.copyItem(at: real, to: helper)
+            do {
+                try fm.copyItem(at: wrapper, to: helper)
+                patched = true
+            } catch {
+                continue
+            }
+        }
+
+        guard patched else { return false }
+
+        let steamCfg = steamDir.appendingPathComponent("steam.cfg")
+        try? "BootStrapperInhibitAll=enable\n".write(
+            to: steamCfg,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        if refreshedOriginal {
+            clearSteamHTMLCache(in: bottle)
+        } else {
+            cleanSteamChromiumLocks(in: bottle)
+        }
+
+        return true
+    }
+
+    private func steamCompatWrapperURL() -> URL? {
+        if let resources = Bundle.main.resourceURL {
+            let bundled = resources.appendingPathComponent("SteamCompat/steamwebhelper-wrapper.exe")
+            if fm.fileExists(atPath: bundled.path) { return bundled }
+        }
+
+        let development = projectRoot.appendingPathComponent("build/steamwebhelper-wrapper.exe")
+        return fm.fileExists(atPath: development.path) ? development : nil
+    }
+
+    private func scheduleSteamBootstrapGuardRemoval(in bottle: Bottle) {
+        let steamCfg = prefixURL(bottle)
+            .appendingPathComponent("drive_c/Program Files (x86)/Steam/steam.cfg")
+
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 20) {
+            let fileManager = FileManager.default
+            guard
+                let text = try? String(contentsOf: steamCfg, encoding: .utf8),
+                text.trimmingCharacters(in: .whitespacesAndNewlines) == "BootStrapperInhibitAll=enable"
+            else { return }
+
+            try? fileManager.removeItem(at: steamCfg)
+        }
+    }
+
+    private func clearStaleSteamBootstrapGuards() {
+        let dirs = (try? fm.contentsOfDirectory(
+            at: bottlesRoot,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+
+        for dir in dirs {
+            let steamCfg = dir
+                .appendingPathComponent("prefix/drive_c/Program Files (x86)/Steam/steam.cfg")
+            guard
+                let text = try? String(contentsOf: steamCfg, encoding: .utf8),
+                text.trimmingCharacters(in: .whitespacesAndNewlines) == "BootStrapperInhibitAll=enable"
+            else { continue }
+
+            try? fm.removeItem(at: steamCfg)
+        }
+    }
+
+    private func clearSteamHTMLCache(in bottle: Bottle) {
+        let usersRoot = prefixURL(bottle).appendingPathComponent("drive_c/users")
+        guard let users = try? fm.contentsOfDirectory(
+            at: usersRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        for user in users {
+            let htmlCache = user.appendingPathComponent("AppData/Local/Steam/htmlcache")
+            try? fm.removeItem(at: htmlCache)
         }
     }
 

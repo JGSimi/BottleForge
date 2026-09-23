@@ -11,6 +11,7 @@ APP="$ROOT/dist/BottleForge.app"
 CONTENTS="$APP/Contents"
 RESOURCES="$CONTENTS/Resources"
 ENGINES="$RESOURCES/Engines"
+STEAM_COMPAT="$RESOURCES/SteamCompat"
 required=(
   "$ROOT/Engine/wine-11.8-dxmt"
   "$ROOT/Engine/wine-11.8-wined3d"
@@ -26,11 +27,23 @@ done
 
 echo "→ Compilando BottleForge $TAG"
 rm -rf "$APP"
-mkdir -p "$CONTENTS/MacOS" "$ENGINES" "$RESOURCES/Licenses"
+mkdir -p "$CONTENTS/MacOS" "$ENGINES" "$RESOURCES/Licenses" "$STEAM_COMPAT"
 
 xcrun swiftc   -parse-as-library   -target arm64-apple-macos14.0   "$ROOT"/App/*.swift   -o "$CONTENTS/MacOS/BottleForge"
 
 chmod +x "$CONTENTS/MacOS/BottleForge"
+
+if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+  echo "x86_64-w64-mingw32-gcc não encontrado (instale mingw-w64)." >&2
+  exit 11
+fi
+
+echo "→ Compilando correção CEF da Steam"
+x86_64-w64-mingw32-gcc \
+  -O2 -municode \
+  "$ROOT/Tools/steamwebhelper-wrapper.c" \
+  -o "$STEAM_COMPAT/steamwebhelper-wrapper.exe" \
+  -static -lshell32 -mwindows
 
 echo "→ Copiando runtimes"
 ditto "$ROOT/Engine/wine-11.8-dxmt" "$ENGINES/wine-11.8-dxmt"

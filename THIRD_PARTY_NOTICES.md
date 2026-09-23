@@ -14,6 +14,10 @@ DXMT fornece tradução Direct3D 10/11 para Metal. A build atualmente empacotada
 
 MoltenVK fornece a camada Vulkan sobre Metal usada pela engine. Consulte `ThirdPartyLicenses/MOLTENVK-LICENSE.txt`.
 
+## Steam CEF compatibility
+
+BottleForge inclui um pequeno wrapper MIT derivado de `notpop/steam-on-m1-wine` para iniciar o `steamwebhelper` com CEF em modo de processo único e renderização por software em Apple Silicon. Consulte `ThirdPartyLicenses/STEAM-ON-M1-WINE-LICENSE.txt`.
+
 ## Laya
 
 O modo de otimização automática usa `@receptron/laya` 0.1.2 (MIT) e o modelo Laya da Convai Innovations (Apache 2.0). Os pesos do modelo não são incluídos no DMG: são baixados no primeiro uso e armazenados no diretório de dados do BottleForge.

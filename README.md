@@ -37,6 +37,7 @@ Use esse comando somente para o BottleForge baixado da página oficial de Releas
 - DXMT 0.80 para Direct3D 10/11 -> Metal
 - WineD3D como renderer alternativo
 - Executar instaladores e programas `.exe`
+- Detectar apps e jogos instalados em cada bottle e abrir com um clique
 - Wine Config
 - Acesso ao drive C: da bottle
 - Encerramento dos processos Wine

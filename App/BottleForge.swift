@@ -23,6 +23,192 @@ struct Bottle: Codable, Identifiable, Hashable {
     var createdAt: Date
 }
 
+struct InstalledApp: Identifiable, Hashable {
+    var id: String
+    var name: String
+    var detail: String
+    var icon: String
+    var executable: URL
+    var arguments: [String]
+}
+
+private enum InstalledAppScanner {
+    static func scan(prefix: URL) -> [InstalledApp] {
+        let fm = FileManager.default
+        let driveC = prefix.appendingPathComponent("drive_c")
+        guard fm.fileExists(atPath: driveC.path) else { return [] }
+
+        var apps: [InstalledApp] = []
+        var seen = Set<String>()
+
+        func add(_ app: InstalledApp) {
+            let key = app.id.lowercased()
+            guard seen.insert(key).inserted else { return }
+            apps.append(app)
+        }
+
+        let steamCandidates = [
+            driveC.appendingPathComponent("Program Files (x86)/Steam/Steam.exe"),
+            driveC.appendingPathComponent("Program Files/Steam/Steam.exe")
+        ]
+
+        if let steam = steamCandidates.first(where: { fm.fileExists(atPath: $0.path) }) {
+            add(InstalledApp(
+                id: "steam",
+                name: "Steam",
+                detail: "Launcher",
+                icon: "gamecontroller.fill",
+                executable: steam,
+                arguments: []
+            ))
+            scanSteamGames(steam: steam, add: add)
+        }
+
+        scanProgramFiles(driveC: driveC, excludingSteam: seen.contains("steam"), add: add)
+
+        return apps.sorted {
+            if $0.detail == $1.detail { return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            if $0.detail == "Launcher" { return true }
+            if $1.detail == "Launcher" { return false }
+            if $0.detail.hasPrefix("Steam") != $1.detail.hasPrefix("Steam") { return $0.detail.hasPrefix("Steam") }
+            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+    }
+
+    private static func scanSteamGames(steam: URL, add: (InstalledApp) -> Void) {
+        let fm = FileManager.default
+        let steamRoot = steam.deletingLastPathComponent()
+        let steamApps = steamRoot.appendingPathComponent("steamapps")
+        guard let manifests = try? fm.contentsOfDirectory(
+            at: steamApps,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        for manifest in manifests where manifest.lastPathComponent.hasPrefix("appmanifest_") && manifest.pathExtension == "acf" {
+            guard
+                let text = try? String(contentsOf: manifest, encoding: .utf8),
+                let appID = acfValue("appid", in: text),
+                let name = acfValue("name", in: text),
+                let installDir = acfValue("installdir", in: text)
+            else { continue }
+
+            let gameDir = steamApps.appendingPathComponent("common").appendingPathComponent(installDir)
+            guard fm.fileExists(atPath: gameDir.path) else { continue }
+
+            add(InstalledApp(
+                id: "steam:\(appID)",
+                name: name,
+                detail: "Steam · Jogo",
+                icon: "play.rectangle.fill",
+                executable: steam,
+                arguments: ["-applaunch", appID]
+            ))
+        }
+    }
+
+    private static func acfValue(_ key: String, in text: String) -> String? {
+        let escaped = NSRegularExpression.escapedPattern(for: key)
+        let pattern = #""\#(escaped)"\s+"([^"]*)""#
+        guard
+            let regex = try? NSRegularExpression(pattern: pattern),
+            let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+            match.numberOfRanges > 1,
+            let range = Range(match.range(at: 1), in: text)
+        else { return nil }
+        return String(text[range])
+    }
+
+    private static func scanProgramFiles(
+        driveC: URL,
+        excludingSteam: Bool,
+        add: (InstalledApp) -> Void
+    ) {
+        let fm = FileManager.default
+        let roots = [
+            driveC.appendingPathComponent("Program Files"),
+            driveC.appendingPathComponent("Program Files (x86)")
+        ]
+        let ignoredFolders = Set([
+            "common files", "internet explorer", "windows media player", "windows nt",
+            "microsoft", "microsoft update health tools", "reference assemblies", "modifiablewindowsapps"
+        ])
+
+        for root in roots {
+            guard let folders = try? fm.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+
+            for folder in folders {
+                let folderName = folder.lastPathComponent
+                let lowerFolder = folderName.lowercased()
+                guard !ignoredFolders.contains(lowerFolder) else { continue }
+                if excludingSteam && lowerFolder == "steam" { continue }
+                guard let executable = bestExecutable(in: folder, appName: folderName) else { continue }
+
+                add(InstalledApp(
+                    id: "exe:\(executable.path)",
+                    name: folderName,
+                    detail: "Aplicativo Windows",
+                    icon: "app.fill",
+                    executable: executable,
+                    arguments: []
+                ))
+            }
+        }
+    }
+
+    private static func bestExecutable(in folder: URL, appName: String) -> URL? {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: folder,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return nil }
+
+        let ignoredNames = [
+            "unins", "uninstall", "setup", "installer", "update", "updater",
+            "crash", "report", "helper", "service", "redist", "dxsetup",
+            "unitycrashhandler", "elevate", "bootstrap", "steamservice"
+        ]
+        let normalizedApp = normalized(appName)
+        var best: (url: URL, score: Int)?
+
+        for case let url as URL in enumerator {
+            if enumerator.level > 4 {
+                enumerator.skipDescendants()
+                continue
+            }
+            guard url.pathExtension.lowercased() == "exe" else { continue }
+
+            let base = url.deletingPathExtension().lastPathComponent.lowercased()
+            guard !ignoredNames.contains(where: { base.contains($0) }) else { continue }
+
+            let normalizedExe = normalized(base)
+            var score = max(0, 20 - enumerator.level * 3)
+            if normalizedExe == normalizedApp { score += 80 }
+            else if normalizedExe.contains(normalizedApp) || normalizedApp.contains(normalizedExe) { score += 35 }
+
+            if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                score += min(20, size / 5_000_000)
+            }
+
+            if best == nil || score > best!.score {
+                best = (url, score)
+            }
+        }
+        return best?.url
+    }
+
+    private static func normalized(_ text: String) -> String {
+        text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .joined()
+    }
+}
+
 @MainActor
 final class BottleStore: ObservableObject {
     @Published var bottles: [Bottle] = []
@@ -100,14 +286,26 @@ final class BottleStore: ObservableObject {
         }
     }
     func runExecutable(_ url: URL, in bottle: Bottle) {
+        launch(url, arguments: [], displayName: url.lastPathComponent, in: bottle)
+    }
+
+    func installedApps(in bottle: Bottle) -> [InstalledApp] {
+        InstalledAppScanner.scan(prefix: prefixURL(bottle))
+    }
+
+    func runInstalledApp(_ app: InstalledApp, in bottle: Bottle) {
+        launch(app.executable, arguments: app.arguments, displayName: app.name, in: bottle)
+    }
+
+    private func launch(_ executable: URL, arguments: [String], displayName: String, in bottle: Bottle) {
         guard let wine = wineURL(for: bottle.renderer) else {
             status = "Engine Wine não encontrada"
             return
         }
         installDXMTIntoPrefixIfNeeded(bottle)
-        status = "Abrindo \(url.lastPathComponent)…"
-        runProcess(wine, args: [url.path], bottle: bottle) { code in
-            self.status = code == 0 ? "Processo finalizado" : "Processo saiu com código \(code)"
+        status = "Abrindo \(displayName)…"
+        runProcess(wine, args: [executable.path] + arguments, bottle: bottle) { code in
+            self.status = code == 0 ? "\(displayName) finalizado" : "\(displayName) saiu com código \(code)"
         }
     }
 
@@ -298,7 +496,7 @@ struct ContentView: View {
                 selectedBottle = store.bottles.first
             }
         }
-        .onChange(of: store.bottles) { bottles in
+        .onChange(of: store.bottles) { _, bottles in
             if let selected = selectedBottle, !bottles.contains(selected) {
                 selectedBottle = bottles.first
             } else if selectedBottle == nil {
@@ -328,37 +526,124 @@ struct ContentView: View {
 struct BottleDetail: View {
     @EnvironmentObject private var store: BottleStore
     let bottle: Bottle
+    @State private var installedApps: [InstalledApp] = []
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(bottle.name).font(.largeTitle.bold())
-                Text("\(bottle.renderer.rawValue) — \(bottle.renderer.detail)")
-                    .foregroundStyle(.secondary)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(bottle.name).font(.largeTitle.bold())
+                    Text("\(bottle.renderer.rawValue) — \(bottle.renderer.detail)")
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 12) {
+                    Button("Executar .exe") { chooseExecutable() }
+                        .buttonStyle(.borderedProminent)
+                    Button("Wine Config") { store.wineConfig(bottle) }
+                    Button("Abrir C:") { store.revealDriveC(bottle) }
+                    Button("Encerrar") { store.kill(bottle) }
+                }
+
+                installedAppsBox
+
+                GroupBox("Configuração") {
+                    LabeledContent("Renderer", value: bottle.renderer.rawValue)
+                    LabeledContent("MSync", value: bottle.msync ? "Ativo" : "Desativado")
+                    LabeledContent("Prefixo", value: bottle.id.uuidString)
+                }
+
+                Button("Excluir bottle", role: .destructive) {
+                    store.delete(bottle)
+                }
+                .padding(.top, 4)
             }
-
-            HStack(spacing: 12) {
-                Button("Executar .exe") { chooseExecutable() }
-                    .buttonStyle(.borderedProminent)
-                Button("Wine Config") { store.wineConfig(bottle) }
-                Button("Abrir C:") { store.revealDriveC(bottle) }
-                Button("Encerrar") { store.kill(bottle) }
-            }
-
-            GroupBox("Configuração") {
-                LabeledContent("Renderer", value: bottle.renderer.rawValue)
-                LabeledContent("MSync", value: bottle.msync ? "Ativo" : "Desativado")
-                LabeledContent("Prefixo", value: bottle.id.uuidString)
-            }
-
-            Spacer()
-
-            Button("Excluir bottle", role: .destructive) {
-                store.delete(bottle)
+            .padding(28)
+        }
+        .navigationTitle(bottle.name)
+        .onAppear { refreshInstalledApps() }
+        .onChange(of: bottle.id) { _, _ in refreshInstalledApps() }
+        .onChange(of: store.status) { _, status in
+            if status.hasSuffix("finalizado") {
+                refreshInstalledApps()
             }
         }
-        .padding(28)
-        .navigationTitle(bottle.name)
+    }
+
+    private var installedAppsBox: some View {
+        GroupBox {
+            if installedApps.isEmpty {
+                HStack(spacing: 12) {
+                    Image(systemName: "square.stack.3d.up.slash")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Nenhum aplicativo detectado")
+                            .font(.headline)
+                        Text("Instale um programa ou jogo nesta bottle e clique em atualizar.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(.vertical, 8)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(installedApps) { app in
+                        Button {
+                            store.runInstalledApp(app, in: bottle)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: app.icon)
+                                    .font(.title3)
+                                    .frame(width: 34, height: 34)
+                                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(app.name)
+                                        .font(.headline)
+                                        .foregroundStyle(.primary)
+                                    Text(app.detail)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                Spacer()
+
+                                Text("Abrir")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Image(systemName: "play.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .contentShape(Rectangle())
+                            .padding(.vertical, 9)
+                        }
+                        .buttonStyle(.plain)
+
+                        if app.id != installedApps.last?.id {
+                            Divider()
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack {
+                Text(installedApps.isEmpty ? "Instalados" : "Instalados (\(installedApps.count))")
+                Spacer()
+                Button {
+                    refreshInstalledApps()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("Atualizar aplicativos instalados")
+            }
+        }
+    }
+
+    private func refreshInstalledApps() {
+        installedApps = store.installedApps(in: bottle)
     }
 
     private func chooseExecutable() {

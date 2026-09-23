@@ -18,8 +18,23 @@ mkdir -p "$STAGE"
 ditto "$APP" "$STAGE/BottleForge.app"
 ln -s /Applications "$STAGE/Applications"
 
-rm -f "$DMG"
-hdiutil create   -volname "BottleForge"   -srcfolder "$STAGE"   -ov   -format UDZO   "$DMG"
+created=0
+for attempt in 1 2 3; do
+  rm -f "$DMG"
+
+  if hdiutil create     -volname "BottleForge"     -srcfolder "$STAGE"     -ov     -format UDZO     "$DMG"; then
+    created=1
+    break
+  fi
+
+  echo "Tentativa $attempt de 3 falhou ao criar o DMG." >&2
+  sleep $((attempt * 3))
+done
+
+if [[ "$created" -ne 1 ]]; then
+  echo "Não foi possível criar o DMG após 3 tentativas." >&2
+  exit 20
+fi
 
 echo "→ Calculando SHA-256"
 HASH="$(shasum -a 256 "$DMG" | awk '{print $1}')"

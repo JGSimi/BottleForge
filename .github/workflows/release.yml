@@ -83,8 +83,23 @@ jobs:
             FLAGS+=(--prerelease)
           fi
 
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG"               "$DMG" release/SHA256SUMS.txt               --clobber               --repo "$GITHUB_REPOSITORY"
-          else
-            gh release create "$TAG"               "$DMG" release/SHA256SUMS.txt               --repo "$GITHUB_REPOSITORY"               --title "BottleForge $TAG"               --generate-notes               "${FLAGS[@]}"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG"               --repo "$GITHUB_REPOSITORY"               --title "BottleForge $TAG"               --generate-notes               "${FLAGS[@]}"
+            sleep 3
+          fi
+
+          uploaded=0
+          for attempt in 1 2 3; do
+            if gh release upload "$TAG"               "$DMG" release/SHA256SUMS.txt               --clobber               --repo "$GITHUB_REPOSITORY"; then
+              uploaded=1
+              break
+            fi
+
+            echo "Tentativa $attempt de 3 falhou no upload da release." >&2
+            sleep $((attempt * 5))
+          done
+
+          if [[ "$uploaded" -ne 1 ]]; then
+            echo "Upload da release falhou após 3 tentativas." >&2
+            exit 30
           fi

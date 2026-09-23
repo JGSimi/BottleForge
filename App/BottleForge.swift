@@ -282,9 +282,12 @@ final class BottleStore: ObservableObject {
             process.standardError = errorPipe
 
             var launchError: Error?
+            var exitCode: Int32?
+
             do {
                 try process.run()
                 process.waitUntilExit()
+                exitCode = process.terminationStatus
             } catch {
                 launchError = error
             }
@@ -293,7 +296,6 @@ final class BottleStore: ObservableObject {
             let errorText = String(data: errorData, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let available = Self.rosettaIsAvailable()
-            let exitCode = process.isRunning ? Int32(-1) : process.terminationStatus
 
             DispatchQueue.main.async {
                 self.rosettaInstalling = false
@@ -307,7 +309,7 @@ final class BottleStore: ObservableObject {
                 } else if !errorText.isEmpty {
                     self.status = "Rosetta 2 não foi instalada: \(errorText)"
                 } else {
-                    self.status = "Rosetta 2 não foi instalada (código \(exitCode))"
+                    self.status = "Rosetta 2 não foi instalada (código \(exitCode ?? -1))"
                 }
             }
         }

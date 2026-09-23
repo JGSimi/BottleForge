@@ -39,6 +39,7 @@ Use esse comando somente para o BottleForge baixado da página oficial de Releas
 - Executar instaladores e programas `.exe`
 - Detectar apps e jogos instalados em cada bottle e abrir com um clique
 - Atualizações automáticas via GitHub Releases com validação SHA-256
+- Perfil de compatibilidade automático para Steam CEF no Apple Silicon
 - Wine Config
 - Acesso ao drive C: da bottle
 - Encerramento dos processos Wine

@@ -59,7 +59,7 @@ private enum InstalledAppScanner {
                 detail: "Launcher",
                 icon: "gamecontroller.fill",
                 executable: steam,
-                arguments: ["-cef-disable-gpu"]
+                arguments: []
             ))
             scanSteamGames(steam: steam, add: add)
         }
@@ -102,7 +102,7 @@ private enum InstalledAppScanner {
                 detail: "Steam · Jogo",
                 icon: "play.rectangle.fill",
                 executable: steam,
-                arguments: ["-cef-disable-gpu", "-applaunch", appID]
+                arguments: ["-applaunch", appID]
             ))
         }
     }
@@ -302,11 +302,203 @@ final class BottleStore: ObservableObject {
             status = "Engine Wine não encontrada"
             return
         }
+
         installDXMTIntoPrefixIfNeeded(bottle)
+
+        if isSteamExecutable(executable) {
+            launchSteam(executable, arguments: arguments, displayName: displayName, wine: wine, bottle: bottle)
+            return
+        }
+
         status = "Abrindo \(displayName)…"
         runProcess(wine, args: [executable.path] + arguments, bottle: bottle) { code in
             self.status = code == 0 ? "\(displayName) finalizado" : "\(displayName) saiu com código \(code)"
         }
+    }
+
+    private func isSteamExecutable(_ executable: URL) -> Bool {
+        executable.lastPathComponent.caseInsensitiveCompare("Steam.exe") == .orderedSame
+            && executable.path.lowercased().contains("/steam/")
+    }
+
+    private func launchSteam(
+        _ executable: URL,
+        arguments: [String],
+        displayName: String,
+        wine: URL,
+        bottle: Bottle
+    ) {
+        if !arguments.contains("-applaunch") {
+            terminateRunningSteam(in: bottle)
+        }
+
+        guard prepareSteamCompatibility(in: bottle) else {
+            status = "Não foi possível preparar a compatibilidade da Steam"
+            return
+        }
+
+        cleanSteamChromiumLocks(in: bottle)
+
+        let size = steamVirtualDesktopSize()
+        let windowsExecutable = windowsPath(for: executable, in: bottle)
+        let steamArgs = [
+            "-no-cef-sandbox",
+            "-cef-single-process",
+            "-noverifyfiles"
+        ] + arguments
+
+        let overrides: String
+        if bottle.renderer == .dxmt {
+            overrides = "dxgi,d3d11,d3d10core=n,b;bcrypt=b;ncrypt=b;gameoverlayrenderer,gameoverlayrenderer64=d"
+        } else {
+            overrides = "bcrypt=b;ncrypt=b;gameoverlayrenderer,gameoverlayrenderer64=d"
+        }
+
+        status = "Abrindo \(displayName)…"
+        runProcess(
+            wine,
+            args: [
+                "explorer.exe",
+                "/desktop=BottleForgeSteam,\(size)",
+                windowsExecutable
+            ] + steamArgs,
+            bottle: bottle,
+            environmentOverrides: [
+                "WINEDLLOVERRIDES": overrides
+            ]
+        ) { code in
+            self.status = code == 0 ? "\(displayName) finalizado" : "\(displayName) saiu com código \(code)"
+        }
+    }
+
+    private func terminateRunningSteam(in bottle: Bottle) {
+        guard let server = wineserverURL(for: bottle.renderer) else { return }
+
+        let process = Process()
+        process.executableURL = server
+        process.arguments = ["-k"]
+        process.environment = environment(for: bottle)
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            // Continue: Steam may not have been running.
+        }
+    }
+
+    private func prepareSteamCompatibility(in bottle: Bottle) -> Bool {
+        guard let wrapper = steamCompatWrapperURL() else { return false }
+
+        let steamDir = prefixURL(bottle)
+            .appendingPathComponent("drive_c/Program Files (x86)/Steam")
+        let cefRoot = steamDir.appendingPathComponent("bin/cef")
+
+        guard let cefDirs = try? fm.contentsOfDirectory(
+            at: cefRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return false }
+
+        var patched = false
+
+        for cefDir in cefDirs where cefDir.lastPathComponent.lowercased().hasPrefix("cef.win") {
+            let helper = cefDir.appendingPathComponent("steamwebhelper.exe")
+            let real = cefDir.appendingPathComponent("steamwebhelper_real.exe")
+
+            if fm.fileExists(atPath: helper.path),
+               let size = try? helper.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+               size > 1_000_000 {
+                try? fm.removeItem(at: real)
+                do {
+                    try fm.moveItem(at: helper, to: real)
+                } catch {
+                    continue
+                }
+            }
+
+            guard fm.fileExists(atPath: real.path) else { continue }
+
+            try? fm.removeItem(at: helper)
+            do {
+                try fm.copyItem(at: wrapper, to: helper)
+                patched = true
+            } catch {
+                continue
+            }
+        }
+
+        let steamCfg = steamDir.appendingPathComponent("steam.cfg")
+        if let text = try? String(contentsOf: steamCfg, encoding: .utf8),
+           text.trimmingCharacters(in: .whitespacesAndNewlines) == "BootStrapperInhibitAll=enable" {
+            try? fm.removeItem(at: steamCfg)
+        }
+
+        let caSource = URL(fileURLWithPath: "/etc/ssl/cert.pem")
+        let caDestination = prefixURL(bottle).appendingPathComponent("drive_c/windows/cacert.pem")
+        if fm.fileExists(atPath: caSource.path) {
+            try? fm.removeItem(at: caDestination)
+            try? fm.copyItem(at: caSource, to: caDestination)
+        }
+
+        return patched
+    }
+
+    private func steamCompatWrapperURL() -> URL? {
+        if let resources = Bundle.main.resourceURL {
+            let bundled = resources.appendingPathComponent("SteamCompat/steamwebhelper-wrapper.exe")
+            if fm.fileExists(atPath: bundled.path) { return bundled }
+        }
+
+        let development = projectRoot.appendingPathComponent("build/steamwebhelper-wrapper.exe")
+        return fm.fileExists(atPath: development.path) ? development : nil
+    }
+
+    private func cleanSteamChromiumLocks(in bottle: Bottle) {
+        let usersRoot = prefixURL(bottle).appendingPathComponent("drive_c/users")
+        guard let users = try? fm.contentsOfDirectory(
+            at: usersRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        for user in users {
+            let htmlCache = user.appendingPathComponent("AppData/Local/Steam/htmlcache")
+            guard let enumerator = fm.enumerator(
+                at: htmlCache,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+
+            for case let url as URL in enumerator {
+                if enumerator.level > 2 {
+                    enumerator.skipDescendants()
+                    continue
+                }
+
+                let name = url.lastPathComponent
+                if name.hasPrefix("Singleton")
+                    || name.hasSuffix(".lock")
+                    || name.hasPrefix("CrashpadMetrics") && name.hasSuffix(".pma") {
+                    try? fm.removeItem(at: url)
+                }
+            }
+        }
+    }
+
+    private func steamVirtualDesktopSize() -> String {
+        guard let screen = NSScreen.main else { return "1440x900" }
+        let frame = screen.visibleFrame
+        return "\(max(800, Int(frame.width)))x\(max(600, Int(frame.height)))"
+    }
+
+    private func windowsPath(for executable: URL, in bottle: Bottle) -> String {
+        let driveC = prefixURL(bottle).appendingPathComponent("drive_c").path + "/"
+        guard executable.path.hasPrefix(driveC) else { return executable.path }
+        let relative = String(executable.path.dropFirst(driveC.count))
+        return "C:\\" + relative.replacingOccurrences(of: "/", with: "\\")
     }
 
     func wineConfig(_ bottle: Bottle) {
@@ -418,9 +610,13 @@ final class BottleStore: ObservableObject {
         _ executable: URL,
         args: [String],
         bottle: Bottle,
+        environmentOverrides: [String: String] = [:],
         completion: @escaping (Int32) -> Void
     ) {
-        let env = environment(for: bottle)
+        var env = environment(for: bottle)
+        for (key, value) in environmentOverrides {
+            env[key] = value
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process()
             process.executableURL = executable

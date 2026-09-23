@@ -50,6 +50,13 @@ jobs:
           ditto             /tmp/bottleforge-mount/BottleForge.app/Contents/Resources/Engines             "$GITHUB_WORKSPACE/Engine"
           hdiutil detach /tmp/bottleforge-mount -quiet
 
+      - name: Install Steam compatibility compiler
+        shell: bash
+        run: |
+          if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+            brew install mingw-w64
+          fi
+
       - name: Build app
         shell: bash
         run: |

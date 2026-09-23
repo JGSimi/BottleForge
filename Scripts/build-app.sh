@@ -1,0 +1,79 @@
+#!/bin/zsh
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TAG="${1:-v0.1.0-alpha}"
+VERSION="${TAG#v}"
+SHORT_VERSION="${VERSION%%-*}"
+BUILD_NUMBER="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)"
+
+APP="$ROOT/dist/BottleForge.app"
+CONTENTS="$APP/Contents"
+RESOURCES="$CONTENTS/Resources"
+ENGINES="$RESOURCES/Engines"
+
+required=(
+  "$ROOT/Engine/wine-11.17"
+  "$ROOT/Engine/wine-11.17-wined3d"
+  "$ROOT/Engine/dxmt-0.80"
+)
+
+for requiredPath in "${required[@]}"; do
+  if [[ ! -d "$requiredPath" ]]; then
+    echo "Engine ausente: $requiredPath" >&2
+    exit 10
+  fi
+done
+
+echo "→ Compilando BottleForge $TAG"
+rm -rf "$APP"
+mkdir -p "$CONTENTS/MacOS" "$ENGINES" "$RESOURCES/Licenses"
+
+xcrun swiftc   -parse-as-library   -target arm64-apple-macos14.0   "$ROOT"/App/*.swift   -o "$CONTENTS/MacOS/BottleForge"
+
+chmod +x "$CONTENTS/MacOS/BottleForge"
+
+echo "→ Copiando runtimes"
+ditto "$ROOT/Engine/wine-11.17" "$ENGINES/wine-11.17"
+ditto "$ROOT/Engine/wine-11.17-wined3d" "$ENGINES/wine-11.17-wined3d"
+ditto "$ROOT/Engine/dxmt-0.80" "$ENGINES/dxmt-0.80"
+
+ditto "$ROOT/ThirdPartyLicenses" "$RESOURCES/Licenses"
+cp "$ROOT/THIRD_PARTY_NOTICES.md" "$RESOURCES/"
+cat > "$CONTENTS/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDisplayName</key>
+  <string>BottleForge</string>
+  <key>CFBundleExecutable</key>
+  <string>BottleForge</string>
+  <key>CFBundleIdentifier</key>
+  <string>app.bottleforge.BottleForge</string>
+  <key>CFBundleName</key>
+  <string>BottleForge</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>$SHORT_VERSION</string>
+  <key>CFBundleVersion</key>
+  <string>$BUILD_NUMBER</string>
+  <key>BottleForgeReleaseTag</key>
+  <string>$TAG</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+</dict>
+</plist>
+PLIST
+
+plutil -lint "$CONTENTS/Info.plist"
+codesign --force --deep --sign - "$APP"
+codesign --verify --deep --strict "$APP"
+
+echo "✓ Build pronta: $APP"
+echo "  Release tag: $TAG"
+echo "  Version: $SHORT_VERSION ($BUILD_NUMBER)"

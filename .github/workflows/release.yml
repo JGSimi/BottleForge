@@ -1,0 +1,90 @@
+name: Release BottleForge
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag existente para publicar"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  RUNTIME_SOURCE_TAG: v0.1.0-alpha
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve tag
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            TAG="${{ inputs.tag }}"
+            git checkout "$TAG"
+          else
+            TAG="$GITHUB_REF_NAME"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Bootstrap bundled runtimes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          mkdir -p Engine /tmp/bottleforge-runtime /tmp/bottleforge-mount
+          gh release download "$RUNTIME_SOURCE_TAG"             --repo "$GITHUB_REPOSITORY"             --pattern "BottleForge-*-macOS.dmg"             --dir /tmp/bottleforge-runtime
+          DMG="$(find /tmp/bottleforge-runtime -name '*.dmg' -print -quit)"
+          test -n "$DMG"
+          hdiutil attach "$DMG"             -nobrowse             -readonly             -mountpoint /tmp/bottleforge-mount
+          ditto             /tmp/bottleforge-mount/BottleForge.app/Contents/Resources/Engines             "$GITHUB_WORKSPACE/Engine"
+          hdiutil detach /tmp/bottleforge-mount -quiet
+
+      - name: Build app
+        shell: bash
+        run: |
+          chmod +x Scripts/*.sh
+          ./Scripts/build-app.sh "${{ steps.version.outputs.tag }}"
+
+      - name: Package DMG
+        shell: bash
+        run: |
+          ./Scripts/package-dmg.sh "${{ steps.version.outputs.tag }}"
+          cd release
+          shasum -a 256 BottleForge-*-macOS.dmg > SHA256SUMS.txt
+
+      - name: Verify artifact
+        shell: bash
+        run: |
+          codesign --verify --deep --strict dist/BottleForge.app
+          test -s release/SHA256SUMS.txt
+          ls -lh release/BottleForge-*-macOS.dmg
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          DMG="release/BottleForge-$TAG-macOS.dmg"
+          FLAGS=()
+
+          if [[ "$TAG" == *-alpha* || "$TAG" == *-beta* || "$TAG" == *-rc* ]]; then
+            FLAGS+=(--prerelease)
+          fi
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG"               "$DMG" release/SHA256SUMS.txt               --clobber               --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG"               "$DMG" release/SHA256SUMS.txt               --repo "$GITHUB_REPOSITORY"               --title "BottleForge $TAG"               --generate-notes               "${FLAGS[@]}"
+          fi

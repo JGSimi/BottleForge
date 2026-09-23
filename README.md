@@ -38,6 +38,7 @@ Use esse comando somente para o BottleForge baixado da página oficial de Releas
 - WineD3D como renderer alternativo
 - Executar instaladores e programas `.exe`
 - Detectar apps e jogos instalados em cada bottle e abrir com um clique
+- Atualizações automáticas via GitHub Releases com validação SHA-256
 - Wine Config
 - Acesso ao drive C: da bottle
 - Encerramento dos processos Wine
@@ -45,9 +46,18 @@ Use esse comando somente para o BottleForge baixado da página oficial de Releas
 
 ## Desenvolvimento
 
-O código do aplicativo fica em `App/BottleForge.swift`.
+O app principal fica em `App/BottleForge.swift` e o sistema de atualização em `App/UpdateManager.swift`.
 
 As engines não são versionadas no Git devido ao tamanho. A distribuição Full publicada em Releases contém os runtimes necessários dentro do próprio `.app`.
+
+## Releases e atualização
+
+O app verifica automaticamente novas GitHub Releases. O processo de deploy
+está documentado em `DEPLOY.md` e pode ser disparado com:
+
+```bash
+./Scripts/release.sh v0.1.1-alpha
+```
 
 ## Estado do projeto
 

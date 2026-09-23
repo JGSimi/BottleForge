@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Typecheck Swift
+        run: xcrun swiftc -parse-as-library -typecheck App/*.swift
+
+      - name: Validate scripts
+        run: |
+          chmod +x Scripts/*.sh
+          zsh -n Scripts/build-app.sh
+          zsh -n Scripts/package-dmg.sh
+          zsh -n Scripts/release.sh

@@ -455,7 +455,9 @@ final class BottleStore: ObservableObject {
 
 struct ContentView: View {
     @EnvironmentObject private var store: BottleStore
+    @EnvironmentObject private var updater: UpdateManager
     @State private var showingCreate = false
+    @State private var showingUpdate = false
     @State private var selectedBottle: Bottle?
 
     var body: some View {
@@ -471,6 +473,13 @@ struct ContentView: View {
             }
             .navigationTitle("BottleForge")
             .toolbar {
+                if updater.availableUpdate != nil {
+                    Button(action: { showingUpdate = true }) {
+                        Label("Atualização disponível", systemImage: "arrow.down.circle.fill")
+                    }
+                    .help("Nova versão do BottleForge disponível")
+                }
+
                 Button(action: { showingCreate = true }) {
                     Label("Nova bottle", systemImage: "plus")
                 }
@@ -491,10 +500,15 @@ struct ContentView: View {
             CreateBottleView()
                 .environmentObject(store)
         }
+        .sheet(isPresented: $showingUpdate) {
+            UpdateView()
+                .environmentObject(updater)
+        }
         .onAppear {
             if selectedBottle == nil {
                 selectedBottle = store.bottles.first
             }
+            updater.checkForUpdates(silent: true)
         }
         .onChange(of: store.bottles) { _, bottles in
             if let selected = selectedBottle, !bottles.contains(selected) {
@@ -503,6 +517,16 @@ struct ContentView: View {
                 selectedBottle = bottles.first
             }
         }
+        .onChange(of: updater.availableUpdate) { _, update in
+            if update != nil {
+                showingUpdate = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification
+        )) { _ in
+            updater.checkForUpdates(silent: true)
+        }
         .safeAreaInset(edge: .bottom) {
             HStack {
                 Circle()
@@ -510,6 +534,22 @@ struct ContentView: View {
                     .frame(width: 8, height: 8)
                 Text(store.status).font(.caption)
                 Spacer()
+                if let update = updater.availableUpdate {
+                    Button("\(update.tag) disponível") {
+                        showingUpdate = true
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                } else {
+                    Button {
+                        updater.checkForUpdates()
+                    } label: {
+                        Image(systemName: updater.isChecking ? "clock" : "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Verificar atualizações")
+                }
+
                 Text(store.engineDescription)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -659,6 +699,121 @@ struct BottleDetail: View {
     }
 }
 
+struct UpdateView: View {
+    @EnvironmentObject private var updater: UpdateManager
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Atualizações")
+                        .font(.title2.bold())
+                    Text("Versão atual: \(updater.currentTag)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+            }
+
+            if let release = updater.availableUpdate {
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(release.title)
+                                    .font(.headline)
+                                Text("\(release.tag) · \(formattedSize(release.assetSize))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "arrow.down.circle.fill")
+                                .font(.title)
+                        }
+
+                        if !release.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Divider()
+                            ScrollView {
+                                Text(release.notes)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .textSelection(.enabled)
+                            }
+                            .frame(maxHeight: 180)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                HStack {
+                    if updater.isDownloading {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+
+                    Text(updater.statusMessage ?? "")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Button("Agora não") {
+                        dismiss()
+                    }
+
+                    Button("Atualizar agora") {
+                        updater.installAvailableUpdate()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(updater.isDownloading)
+                }
+            } else {
+                VStack(spacing: 14) {
+                    Image(systemName: "checkmark.circle")
+                        .font(.system(size: 36))
+                        .foregroundStyle(.secondary)
+
+                    Text(updater.isChecking ? "Verificando atualizações…" : "Nenhuma atualização disponível")
+                        .font(.headline)
+
+                    if let status = updater.statusMessage {
+                        Text(status)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Button("Verificar novamente") {
+                        updater.checkForUpdates()
+                    }
+                    .disabled(updater.isChecking)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 28)
+            }
+
+            if let error = updater.errorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
+    }
+
+    private func formattedSize(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+}
+
 struct CreateBottleView: View {
     @EnvironmentObject private var store: BottleStore
     @Environment(\.dismiss) private var dismiss
@@ -705,11 +860,13 @@ struct CreateBottleView: View {
 @main
 struct BottleForgeApp: App {
     @StateObject private var store = BottleStore()
+    @StateObject private var updater = UpdateManager()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(store)
+                .environmentObject(updater)
         }
     }
 }

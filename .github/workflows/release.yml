@@ -88,18 +88,36 @@ jobs:
             sleep 3
           fi
 
+          DMG_NAME="$(basename "$DMG")"
+          LOCAL_SIZE="$(stat -f%z "$DMG")"
           uploaded=0
+
           for attempt in 1 2 3; do
-            if gh release upload "$TAG"               "$DMG" release/SHA256SUMS.txt               --clobber               --repo "$GITHUB_REPOSITORY"; then
+            gh release upload "$TAG" "$DMG"               --clobber               --repo "$GITHUB_REPOSITORY" || true
+
+            sleep 3
+
+            REMOTE_SIZE="$(gh api               "repos/$GITHUB_REPOSITORY/releases/tags/$TAG"               --jq ".assets[] | select(.name == \"$DMG_NAME\") | .size"               | head -1)"
+
+            if [[ "$REMOTE_SIZE" == "$LOCAL_SIZE" ]]; then
               uploaded=1
               break
             fi
 
-            echo "Tentativa $attempt de 3 falhou no upload da release." >&2
+            echo "Tentativa $attempt de 3: DMG remoto ausente ou incompleto." >&2
             sleep $((attempt * 5))
           done
 
           if [[ "$uploaded" -ne 1 ]]; then
-            echo "Upload da release falhou após 3 tentativas." >&2
+            echo "Upload do DMG falhou após 3 tentativas." >&2
             exit 30
           fi
+
+          gh release upload "$TAG" release/SHA256SUMS.txt             --clobber             --repo "$GITHUB_REPOSITORY"
+
+          REMOTE_DMG="$(gh api             "repos/$GITHUB_REPOSITORY/releases/tags/$TAG"             --jq ".assets[] | select(.name == \"$DMG_NAME\" and .state == \"uploaded\") | .name")"
+
+          [[ "$REMOTE_DMG" == "$DMG_NAME" ]] || {
+            echo "DMG não ficou disponível na release." >&2
+            exit 31
+          }

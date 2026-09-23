@@ -158,9 +158,8 @@ final class UpdateManager: ObservableObject {
         Task {
             do {
                 let dmg = try await downloadAndVerify(release)
-                statusMessage = "Instalando \(release.tag)…"
+                statusMessage = "Preparando instalação de \(release.tag)…"
                 try startInstaller(dmg: dmg, release: release)
-                NSApplication.shared.terminate(nil)
             } catch {
                 isDownloading = false
                 errorMessage = "Falha na atualização: \(error.localizedDescription)"
@@ -283,6 +282,20 @@ final class UpdateManager: ObservableObject {
             process.standardError = handle
         }
 
+        process.terminationHandler = { [weak self] process in
+            guard process.terminationStatus != 0 else { return }
+            Task { @MainActor in
+                self?.isDownloading = false
+                self?.statusMessage = nil
+
+                if process.terminationStatus == 22 {
+                    self?.errorMessage = "Espaço insuficiente para concluir a atualização."
+                } else {
+                    self?.errorMessage = "A instalação não pôde ser concluída. Código \(process.terminationStatus)."
+                }
+            }
+        }
+
         try process.run()
     }
 
@@ -322,39 +335,76 @@ final class UpdateManager: ObservableObject {
         TARGET=\(qTarget)
         RELEASE_TAG=\(qTag)
         MOUNT="$(mktemp -d /tmp/BottleForgeUpdate.XXXXXX)"
-        NEW="${TARGET}.update.$$"
-        OLD="${TARGET}.previous.$$"
 
         cleanup() {
           /usr/bin/hdiutil detach "$MOUNT" -quiet 2>/dev/null || true
-          /bin/rm -rf "$MOUNT" "$NEW"
+          /bin/rm -rf "$MOUNT"
           /bin/rm -f "$DMG" "$0"
         }
         trap cleanup EXIT
-
-        while /bin/kill -0 "$PID" 2>/dev/null; do
-          /bin/sleep 0.25
-        done
 
         /usr/bin/hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT" >/dev/null
         SOURCE="$MOUNT/BottleForge.app"
         [[ -d "$SOURCE" ]] || { echo "BottleForge.app ausente no DMG"; exit 20; }
 
-        /bin/rm -rf "$NEW" "$OLD"
-        /usr/bin/ditto "$SOURCE" "$NEW"
-        /usr/bin/codesign --verify --deep --strict "$NEW"
+        /usr/bin/codesign --verify --deep --strict "$SOURCE"
 
-        if [[ -e "$TARGET" ]]; then
-          /bin/mv "$TARGET" "$OLD"
+        SOURCE_KB="$(/usr/bin/du -sk "$SOURCE" | /usr/bin/awk '{print $1}')"
+        CURRENT_KB=0
+        if [[ -d "$TARGET" ]]; then
+          CURRENT_KB="$(/usr/bin/du -sk "$TARGET" | /usr/bin/awk '{print $1}')"
+        fi
+        AVAILABLE_KB="$(/bin/df -Pk "$(dirname "$TARGET")" | /usr/bin/awk 'NR==2 {print $4}')"
+        EFFECTIVE_KB=$((AVAILABLE_KB + CURRENT_KB))
+        REQUIRED_KB=$((SOURCE_KB + 524288))
+
+        if (( EFFECTIVE_KB < REQUIRED_KB )); then
+          echo "Espaço insuficiente para atualizar. Necessário: ${REQUIRED_KB} KB; disponível após substituir app atual: ${EFFECTIVE_KB} KB." >&2
+          exit 22
         fi
 
-        if ! /bin/mv "$NEW" "$TARGET"; then
-          [[ -e "$OLD" ]] && /bin/mv "$OLD" "$TARGET"
+        for _ in {1..8}; do
+          /bin/kill -0 "$PID" 2>/dev/null || break
+          /bin/sleep 0.25
+        done
+
+        if /bin/kill -0 "$PID" 2>/dev/null; then
+          /bin/kill -TERM "$PID" 2>/dev/null || true
+        fi
+
+        for _ in {1..20}; do
+          /bin/kill -0 "$PID" 2>/dev/null || break
+          /bin/sleep 0.25
+        done
+
+        if /bin/kill -0 "$PID" 2>/dev/null; then
+          /bin/kill -KILL "$PID" 2>/dev/null || true
+        fi
+
+        while /bin/kill -0 "$PID" 2>/dev/null; do
+          /bin/sleep 0.1
+        done
+
+        /bin/rm -rf "$TARGET"
+
+        copied=0
+        for attempt in 1 2; do
+          if /usr/bin/ditto "$SOURCE" "$TARGET"              && /usr/bin/codesign --verify --deep --strict "$TARGET"; then
+            copied=1
+            break
+          fi
+
+          echo "Tentativa $attempt de copiar a atualização falhou." >&2
+          /bin/rm -rf "$TARGET"
+          /bin/sleep 1
+        done
+
+        if [[ "$copied" -ne 1 ]]; then
+          echo "Não foi possível instalar a nova versão." >&2
           exit 21
         fi
 
         /usr/bin/xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null || true
-        /bin/rm -rf "$OLD"
         /usr/bin/open "$TARGET"
         echo "Atualizado para $RELEASE_TAG"
         """

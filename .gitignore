@@ -8,6 +8,7 @@ cx-source/
 cx-manual/
 engine-build/
 runtime-*/
+Runtime/
 cx-builder/
 wine-dxmt-howto/
 *.log

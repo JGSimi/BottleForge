@@ -38,6 +38,8 @@ Use esse comando somente para o BottleForge baixado da página oficial de Releas
 - WineD3D como renderer alternativo
 - Executar instaladores e programas `.exe`
 - Detectar apps e jogos instalados em cada bottle e abrir com um clique
+- Modo Auto com Laya local para escolher perfil por jogo (DXMT/MSync/D3D11)
+- Cache persistente de perfil por Steam AppID e fallback automático após falhas
 - Atualizações automáticas via GitHub Releases com validação SHA-256
 - Perfil de compatibilidade automático para Steam CEF no Apple Silicon
 - Wine Config
@@ -50,6 +52,8 @@ Use esse comando somente para o BottleForge baixado da página oficial de Releas
 O app principal fica em `App/BottleForge.swift` e o sistema de atualização em `App/UpdateManager.swift`.
 
 As engines não são versionadas no Git devido ao tamanho. A distribuição Full publicada em Releases contém os runtimes necessários dentro do próprio `.app`.
+
+O runtime do Laya é empacotado com Node.js arm64 e ONNX Runtime. Os pesos do modelo (~1,7 GB) são baixados uma única vez no primeiro jogo otimizado e ficam em `~/Library/Application Support/BottleForge/AI/Laya`; atualizações do app reutilizam esse cache.
 
 ## Releases e atualização
 

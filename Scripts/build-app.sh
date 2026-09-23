@@ -14,6 +14,7 @@ ENGINES="$RESOURCES/Engines"
 required=(
   "$ROOT/Engine/wine-11.8-dxmt"
   "$ROOT/Engine/wine-11.8-wined3d"
+  "$ROOT/Runtime/Laya"
 )
 
 for requiredPath in "${required[@]}"; do
@@ -34,6 +35,9 @@ chmod +x "$CONTENTS/MacOS/BottleForge"
 echo "→ Copiando runtimes"
 ditto "$ROOT/Engine/wine-11.8-dxmt" "$ENGINES/wine-11.8-dxmt"
 ditto "$ROOT/Engine/wine-11.8-wined3d" "$ENGINES/wine-11.8-wined3d"
+
+echo "→ Copiando runtime Laya"
+ditto "$ROOT/Runtime/Laya" "$RESOURCES/LayaRuntime"
 
 ditto "$ROOT/ThirdPartyLicenses" "$RESOURCES/Licenses"
 cp "$ROOT/THIRD_PARTY_NOTICES.md" "$RESOURCES/"

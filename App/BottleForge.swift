@@ -406,12 +406,76 @@ final class BottleStore: ObservableObject {
     }
 
     func runInstalledApp(_ app: InstalledApp, in bottle: Bottle) {
-        if app.id.hasPrefix("steam:") {
-            let appID = String(app.id.dropFirst("steam:".count))
-            monitorSteamGame(appID: appID, name: app.name, bottle: bottle)
+        guard ensureRosettaAvailable() else { return }
+
+        guard app.id.hasPrefix("steam:") else {
+            launch(app.executable, arguments: app.arguments, displayName: app.name, in: bottle)
+            return
         }
 
-        launch(app.executable, arguments: app.arguments, displayName: app.name, in: bottle)
+        let appID = String(app.id.dropFirst("steam:".count))
+        monitorSteamGame(appID: appID, name: app.name, bottle: bottle)
+
+        guard bottle.renderer == .dxmt else {
+            launch(app.executable, arguments: app.arguments, displayName: app.name, in: bottle)
+            return
+        }
+
+        optimizeAndLaunchSteamGame(app, appID: appID, bottle: bottle)
+    }
+
+    private func optimizeAndLaunchSteamGame(_ app: InstalledApp, appID: String, bottle: Bottle) {
+        if let profile = LayaProfileEngine.cachedProfile(appID: appID, supportRoot: supportRoot) {
+            status = "Abrindo \(app.name) · Auto: \(profile.displayName)"
+            launch(
+                app.executable,
+                arguments: app.arguments,
+                displayName: app.name,
+                in: bottle,
+                profile: profile
+            )
+            return
+        }
+
+        let firstRun = !LayaProfileEngine.modelIsCached(supportRoot: supportRoot)
+        status = firstRun
+            ? "Preparando otimização automática (~1,7 GB na primeira vez)…"
+            : "Otimizando \(app.name) com Laya…"
+        busy = true
+
+        let supportRoot = supportRoot
+        let projectRoot = projectRoot
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                let profile = try LayaProfileEngine.chooseProfile(
+                    appID: appID,
+                    gameName: app.name,
+                    renderer: bottle.renderer,
+                    supportRoot: supportRoot,
+                    projectRoot: projectRoot
+                )
+
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.busy = false
+                    self.status = "Laya escolheu \(profile.displayName) · abrindo \(app.name)…"
+                    self.launch(
+                        app.executable,
+                        arguments: app.arguments,
+                        displayName: app.name,
+                        in: bottle,
+                        profile: profile
+                    )
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.busy = false
+                    self.status = "Laya indisponível; usando perfil padrão"
+                    self.launch(app.executable, arguments: app.arguments, displayName: app.name, in: bottle)
+                }
+            }
+        }
     }
 
     private func monitorSteamGame(appID: String, name: String, bottle: Bottle) {
@@ -424,6 +488,7 @@ final class BottleStore: ObservableObject {
         let processLog = steamRoot.appendingPathComponent("logs/gameprocess_log.txt")
         let baselineSize = (try? Data(contentsOf: processLog).count) ?? 0
         let diagnosticsRoot = logsRoot
+        let profileSupportRoot = supportRoot
         let bottleName = bottle.name
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -470,7 +535,8 @@ final class BottleStore: ObservableObject {
                                 self?.status = "\(name) finalizado"
                             }
                         } else {
-                            let fileName = Self.writeSteamDiagnostic(
+                            LayaProfileEngine.invalidate(appID: appID, supportRoot: profileSupportRoot)
+                            _ = Self.writeSteamDiagnostic(
                                 appID: appID,
                                 name: name,
                                 bottleName: bottleName,
@@ -479,13 +545,14 @@ final class BottleStore: ObservableObject {
                                 directory: diagnosticsRoot
                             )
                             DispatchQueue.main.async {
-                                self?.status = "\(name) encerrou com código \(code) · Diagnóstico: \(fileName)"
+                                self?.status = "\(name) encerrou com código \(code) · perfil Auto será recalculado"
                             }
                         }
                         return
                     }
                 } else if Date() > launchDeadline {
-                    let fileName = Self.writeSteamDiagnostic(
+                    LayaProfileEngine.invalidate(appID: appID, supportRoot: profileSupportRoot)
+                    _ = Self.writeSteamDiagnostic(
                         appID: appID,
                         name: name,
                         bottleName: bottleName,
@@ -494,7 +561,7 @@ final class BottleStore: ObservableObject {
                         directory: diagnosticsRoot
                     )
                     DispatchQueue.main.async {
-                        self?.status = "\(name) não iniciou · Diagnóstico: \(fileName)"
+                        self?.status = "\(name) não iniciou · perfil Auto será recalculado"
                     }
                     return
                 }
@@ -533,7 +600,13 @@ final class BottleStore: ObservableObject {
         return fileName
     }
 
-    private func launch(_ executable: URL, arguments: [String], displayName: String, in bottle: Bottle) {
+    private func launch(
+        _ executable: URL,
+        arguments: [String],
+        displayName: String,
+        in bottle: Bottle,
+        profile: LayaGameProfile? = nil
+    ) {
         guard ensureRosettaAvailable() else { return }
 
         guard let wine = wineURL(for: bottle.renderer) else {
@@ -542,7 +615,14 @@ final class BottleStore: ObservableObject {
         }
 
         if isSteamExecutable(executable) {
-            launchSteam(executable, arguments: arguments, displayName: displayName, wine: wine, bottle: bottle)
+            launchSteam(
+                executable,
+                arguments: arguments,
+                displayName: displayName,
+                wine: wine,
+                bottle: bottle,
+                profile: profile
+            )
             return
         }
 
@@ -562,7 +642,8 @@ final class BottleStore: ObservableObject {
         arguments: [String],
         displayName: String,
         wine: URL,
-        bottle: Bottle
+        bottle: Bottle,
+        profile: LayaGameProfile?
     ) {
         if !arguments.contains("-applaunch") {
             terminateRunningSteam(in: bottle)
@@ -574,13 +655,19 @@ final class BottleStore: ObservableObject {
         let steamArgs = [
             "-cef-disable-gpu",
             "-no-cef-sandbox"
-        ] + arguments
+        ] + (profile?.launchArguments ?? []) + arguments
+
+        var environmentOverrides: [String: String] = [:]
+        if let profile {
+            environmentOverrides["WINEMSYNC"] = profile.msync ? "1" : "0"
+        }
 
         status = "Abrindo \(displayName)…"
         runProcess(
             wine,
             args: [executable.path] + steamArgs,
-            bottle: bottle
+            bottle: bottle,
+            environmentOverrides: environmentOverrides
         ) { code in
             self.status = code == 0 ? "\(displayName) finalizado" : "\(displayName) saiu com código \(code)"
         }
@@ -687,7 +774,7 @@ final class BottleStore: ObservableObject {
         status = "\(bottle.name) removido"
     }
     var engineDescription: String {
-        "Wine 11.8 Staging · DXMT 0.80 / WineD3D"
+        "Wine 11.8 Staging · DXMT 0.80 · Auto Laya"
     }
 
     private func wineURL(for renderer: Renderer) -> URL? {
@@ -939,6 +1026,11 @@ struct BottleDetail: View {
                     Text(bottle.name).font(.largeTitle.bold())
                     Text("\(bottle.renderer.rawValue) — \(bottle.renderer.detail)")
                         .foregroundStyle(.secondary)
+                    if bottle.renderer == .dxmt {
+                        Label("Modo Auto com Laya", systemImage: "sparkles")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 HStack(spacing: 12) {
@@ -953,7 +1045,10 @@ struct BottleDetail: View {
 
                 GroupBox("Configuração") {
                     LabeledContent("Renderer", value: bottle.renderer.rawValue)
-                    LabeledContent("MSync", value: bottle.msync ? "Ativo" : "Desativado")
+                    LabeledContent(
+                        "Perfil de jogo",
+                        value: bottle.renderer == .dxmt ? "Auto por jogo · Laya" : "Manual"
+                    )
                     LabeledContent("Prefixo", value: bottle.id.uuidString)
                 }
 
@@ -1007,7 +1102,11 @@ struct BottleDetail: View {
                                     Text(app.name)
                                         .font(.headline)
                                         .foregroundStyle(.primary)
-                                    Text(app.detail)
+                                    Text(
+                                        app.id.hasPrefix("steam:") && bottle.renderer == .dxmt
+                                            ? "\(app.detail) · Auto Laya"
+                                            : app.detail
+                                    )
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -1202,8 +1301,9 @@ struct CreateBottleView: View {
                 }
             }
 
-            Toggle("MSync (requer engine CX custom)", isOn: $msync)
-                .disabled(true)
+            Text("O Modo Auto escolhe MSync e argumentos por jogo.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             HStack {
                 Button("Cancelar") { dismiss() }

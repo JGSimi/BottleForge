@@ -40,6 +40,12 @@ jobs:
           chmod +x Scripts/*.sh
           ./Scripts/bootstrap-engines.sh
 
+      - name: Bootstrap Laya
+        shell: bash
+        run: |
+          chmod +x Scripts/*.sh
+          ./Scripts/bootstrap-laya.sh
+
       - name: Build app
         shell: bash
         run: |

@@ -1,0 +1,8 @@
+{
+  "name": "bottleforge-laya-runtime",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@receptron/laya": "0.1.2"
+  }
+}

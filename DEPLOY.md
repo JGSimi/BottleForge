@@ -17,6 +17,7 @@ A tag dispara `.github/workflows/release.yml`.
 ## O que o GitHub Actions faz
 
 - executa `Scripts/bootstrap-engines.sh`;
+- executa `Scripts/bootstrap-laya.sh` e monta o runtime Laya/Node arm64;
 - baixa Wine 11.8 Staging e DXMT 0.80 de fontes upstream com SHA-256 fixado;
 - monta a engine DXMT com o adapter winemac necessário para superfícies Metal;
 - monta uma segunda engine WineD3D sem o overlay DXMT;

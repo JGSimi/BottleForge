@@ -10,9 +10,13 @@ Wine é um projeto independente de compatibilidade Windows. A build atualmente e
 
 DXMT fornece tradução Direct3D 10/11 para Metal. A build atualmente empacotada é DXMT 0.80. Consulte `ThirdPartyLicenses/DXMT-LICENSE.txt`.
 
+## D3D12 / VKD3D-Proton macOS
+
+Jogos Direct3D 12 podem usar o runtime `metalsharp/VKD3D-Proton-MacOS` v1.0: `d3d12.dll` + `d3d12core.dll` do VKD3D-Proton, `dxgi.dll` do DXVK-macOS e uma build customizada do MoltenVK. O runtime é baixado durante o build e verificado por SHA-256 antes de ser empacotado. Os componentes mantêm suas licenças upstream e o pacote inclui o README/SHA256SUMS do runtime.
+
 ## MoltenVK
 
-MoltenVK fornece a camada Vulkan sobre Metal usada pela engine. Consulte `ThirdPartyLicenses/MOLTENVK-LICENSE.txt`.
+MoltenVK fornece a camada Vulkan sobre Metal usada pela engine e pelo caminho D3D12. Consulte `ThirdPartyLicenses/MOLTENVK-LICENSE.txt`.
 
 ## Steam CEF compatibility
 
@@ -26,4 +30,4 @@ O modo de otimização automática usa `@receptron/laya` 0.1.2 (MIT) e o modelo 
 
 O runtime local do Laya inclui Node.js arm64 e ONNX Runtime Node para inferência local. Os avisos e licenças distribuídos pelos respectivos pacotes acompanham o runtime empacotado.
 
-Outras bibliotecas transitivas incluídas pela distribuição Wine ou pelo runtime Laya mantêm seus respectivos direitos e licenças upstream. Este projeto não reivindica autoria desses componentes.
+Outras bibliotecas transitivas incluídas pela distribuição Wine, pelo runtime D3D12 ou pelo runtime Laya mantêm seus respectivos direitos e licenças upstream. Este projeto não reivindica autoria desses componentes.

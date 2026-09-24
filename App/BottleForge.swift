@@ -97,7 +97,7 @@ private enum InstalledAppScanner {
             guard fm.fileExists(atPath: gameDir.path) else { continue }
 
             let detail = appID == "1245620"
-                ? "Steam · Jogo · Offline (EAC)"
+                ? "Steam · Jogo · Offline · D3D12 (EAC)"
                 : "Steam · Jogo"
 
             add(InstalledApp(
@@ -489,7 +489,8 @@ final class BottleStore: ObservableObject {
                 "DYLD_FALLBACK_LIBRARY_PATH": self.d3d12RuntimeRoot.path,
                 "MVK_PRESENT_MODE": "1",
                 "VKMT_ALLOW_NON_SINGLE_TEXEL_ALIGNMENT": "1",
-                "VKD3D_SHADER_CACHE_PATH": shaderCache.path
+                "VKD3D_SHADER_CACHE_PATH": shaderCache.path,
+                "WINE_DO_NOT_CREATE_DXGI_DEVICE_MANAGER": "0"
             ]
             if let profile {
                 overrides["WINEMSYNC"] = profile.msync ? "1" : "0"
@@ -1022,7 +1023,7 @@ final class BottleStore: ObservableObject {
         status = "\(bottle.name) removido"
     }
     var engineDescription: String {
-        "Wine 11.8 Staging · DXMT 0.80 · Auto Laya"
+        "Wine 11.8 Staging · DXMT 0.80 · D3D12 · Auto Laya"
     }
 
     private func wineURL(for renderer: Renderer) -> URL? {

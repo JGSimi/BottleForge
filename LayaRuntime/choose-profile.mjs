@@ -4,16 +4,23 @@ import { Laya } from "@receptron/laya";
 const input = JSON.parse(fs.readFileSync(0, "utf8"));
 const cacheDir = process.env.LAYA_CACHE;
 
-const criteria = {
-  dxmt_standard:
-    "DXMT/Metal with MSync disabled. Stable baseline with minimal synchronization changes.",
-  dxmt_msync:
-    "DXMT/Metal with MSync enabled. Prefer when reduced Wine synchronization overhead may improve frame pacing.",
-  dxmt_force_d3d11:
-    "DXMT/Metal with MSync disabled and -force-d3d11. Useful for Unity games that may select another graphics API.",
-  dxmt_msync_force_d3d11:
-    "DXMT/Metal with MSync enabled and -force-d3d11. Combines synchronization optimization with explicit D3D11."
-};
+const criteria = input.state.graphicsAPI === "D3D12"
+  ? {
+      vkd3d_standard:
+        "VKD3D-Proton over MoltenVK/Metal with MSync disabled. Native D3D12 compatibility path for Apple Silicon.",
+      vkd3d_msync:
+        "VKD3D-Proton over MoltenVK/Metal with MSync enabled. Use when synchronization overhead is likely to affect frame pacing."
+    }
+  : {
+      dxmt_standard:
+        "DXMT/Metal with MSync disabled. Stable baseline with minimal synchronization changes.",
+      dxmt_msync:
+        "DXMT/Metal with MSync enabled. Prefer when reduced Wine synchronization overhead may improve frame pacing.",
+      dxmt_force_d3d11:
+        "DXMT/Metal with MSync disabled and -force-d3d11. Useful for Unity games that may select another graphics API.",
+      dxmt_msync_force_d3d11:
+        "DXMT/Metal with MSync enabled and -force-d3d11. Combines synchronization optimization with explicit D3D11."
+    };
 
 const laya = await Laya.load({
   cacheDir,

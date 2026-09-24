@@ -96,10 +96,14 @@ private enum InstalledAppScanner {
             let gameDir = steamApps.appendingPathComponent("common").appendingPathComponent(installDir)
             guard fm.fileExists(atPath: gameDir.path) else { continue }
 
+            let detail = appID == "1245620"
+                ? "Steam · Jogo · Offline (EAC)"
+                : "Steam · Jogo"
+
             add(InstalledApp(
                 id: "steam:\(appID)",
                 name: name,
-                detail: "Steam · Jogo",
+                detail: detail,
                 icon: "play.rectangle.fill",
                 executable: steam,
                 arguments: ["-applaunch", appID]
@@ -415,6 +419,12 @@ final class BottleStore: ObservableObject {
         }
 
         let appID = String(app.id.dropFirst("steam:".count))
+
+        if appID == "1245620" {
+            launchEldenRingOffline(app, bottle: bottle)
+            return
+        }
+
         monitorSteamGame(appID: appID, name: app.name, bottle: bottle)
 
         guard bottle.renderer == .dxmt else {
@@ -423,6 +433,106 @@ final class BottleStore: ObservableObject {
         }
 
         optimizeAndLaunchSteamGame(app, appID: appID, bottle: bottle)
+    }
+
+    private func launchEldenRingOffline(_ app: InstalledApp, bottle: Bottle) {
+        let appID = "1245620"
+        let steamRoot = app.executable.deletingLastPathComponent()
+        let gameDir = steamRoot
+            .appendingPathComponent("steamapps/common/ELDEN RING/Game")
+        let game = gameDir.appendingPathComponent("eldenring.exe")
+
+        guard fm.fileExists(atPath: game.path) else {
+            status = "Elden Ring não encontrado na biblioteca padrão da Steam"
+            return
+        }
+
+        do {
+            try "1245620\n".write(
+                to: gameDir.appendingPathComponent("steam_appid.txt"),
+                atomically: true,
+                encoding: .utf8
+            )
+        } catch {
+            status = "Não foi possível preparar o modo offline do Elden Ring"
+            return
+        }
+
+        let launchWithProfile: (LayaGameProfile?) -> Void = { [weak self] profile in
+            guard let self else { return }
+            guard let wine = self.wineURL(for: bottle.renderer) else {
+                self.status = "Engine Wine não encontrada"
+                return
+            }
+
+            var overrides: [String: String] = [
+                "SteamAppId": appID,
+                "SteamGameId": appID
+            ]
+            if let profile {
+                overrides["WINEMSYNC"] = profile.msync ? "1" : "0"
+            }
+
+            self.status = profile == nil
+                ? "Abrindo Elden Ring · Offline"
+                : "Abrindo Elden Ring · Offline · Auto: \(profile!.displayName)"
+
+            self.runProcess(
+                wine,
+                args: [game.path] + (profile?.launchArguments ?? []),
+                bottle: bottle,
+                environmentOverrides: overrides,
+                workingDirectory: gameDir
+            ) { code in
+                if code == 0 {
+                    self.status = "Elden Ring finalizado · Offline"
+                } else {
+                    LayaProfileEngine.invalidate(appID: appID, supportRoot: self.supportRoot)
+                    self.status = "Elden Ring saiu com código \(code) · perfil Auto será recalculado"
+                }
+            }
+        }
+
+        guard bottle.renderer == .dxmt else {
+            launchWithProfile(nil)
+            return
+        }
+
+        if let profile = LayaProfileEngine.cachedProfile(appID: appID, supportRoot: supportRoot) {
+            launchWithProfile(profile)
+            return
+        }
+
+        let firstRun = !LayaProfileEngine.modelIsCached(supportRoot: supportRoot)
+        status = firstRun
+            ? "Preparando Elden Ring offline + otimização automática…"
+            : "Otimizando Elden Ring offline com Laya…"
+        busy = true
+
+        let supportRoot = supportRoot
+        let projectRoot = projectRoot
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                let profile = try LayaProfileEngine.chooseProfile(
+                    appID: appID,
+                    gameName: app.name + " (offline, sem EAC)",
+                    renderer: bottle.renderer,
+                    supportRoot: supportRoot,
+                    projectRoot: projectRoot
+                )
+
+                DispatchQueue.main.async {
+                    self?.busy = false
+                    launchWithProfile(profile)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self?.busy = false
+                    self?.status = "Laya indisponível; abrindo Elden Ring offline com perfil padrão"
+                    launchWithProfile(nil)
+                }
+            }
+        }
     }
 
     private func optimizeAndLaunchSteamGame(_ app: InstalledApp, appID: String, bottle: Bottle) {
@@ -958,6 +1068,7 @@ final class BottleStore: ObservableObject {
         args: [String],
         bottle: Bottle,
         environmentOverrides: [String: String] = [:],
+        workingDirectory: URL? = nil,
         completion: @escaping (Int32) -> Void
     ) {
         var env = environment(for: bottle)
@@ -969,6 +1080,7 @@ final class BottleStore: ObservableObject {
             process.executableURL = executable
             process.arguments = args
             process.environment = env
+            process.currentDirectoryURL = workingDirectory
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
             do {

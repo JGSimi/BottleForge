@@ -56,11 +56,7 @@ cp "$SRC/"{dxgi.dll,d3d12.dll,d3d12core.dll,libMoltenVK.dylib,MoltenVK_icd.json,
 
 (
   cd "$RUNTIME"
-  printf '%s  %s\n' "943dc921530aeba8bc5add09f5a3c5fac7da50e90a84ca2f41f1b87ba532846e" "dxgi.dll" | shasum -a 256 -c -
-  printf '%s  %s\n' "ac2b8674798bdbdd21ce1aa48daf1e2657813ecc878b80e2641bf0d2c3f2a43e" "d3d12.dll" | shasum -a 256 -c -
-  printf '%s  %s\n' "78ab917a20dbc050ba3d0def8c0241e53c90ded0a036462955108e0ef78022a8" "d3d12core.dll" | shasum -a 256 -c -
-  printf '%s  %s\n' "38e0a7c3839390d524a3bb4b1165d13e96a2c3e771a14df2510c1ad5ab598bde" "libMoltenVK.dylib" | shasum -a 256 -c -
-  printf '%s  %s\n' "578ff08cd0d8734619357541771a5abc9c3470ca300030219a971a9e9dbbe466" "MoltenVK_icd.json" | shasum -a 256 -c -
+  shasum -a 256 -c SHA256SUMS
 )
 
 codesign --verify "$RUNTIME/libMoltenVK.dylib" 2>/dev/null || true

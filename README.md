@@ -35,12 +35,13 @@ Use esse comando somente para o BottleForge baixado da página oficial de Releas
 - Bottles isoladas e persistentes
 - Wine 11.8 Staging
 - DXMT 0.80 para Direct3D 10/11 -> Metal
+- VKD3D-Proton + MoltenVK para Direct3D 12 -> Metal
 - WineD3D como renderer alternativo
 - Executar instaladores e programas `.exe`
 - Detectar apps e jogos instalados em cada bottle e abrir com um clique
-- Modo Auto com Laya local para escolher perfil por jogo (DXMT/MSync/D3D11)
+- Modo Auto com Laya local para escolher perfil por jogo (DXMT/MSync/D3D11/D3D12)
 - Cache persistente de perfil por Steam AppID e fallback automático após falhas
-- Perfil offline para Elden Ring (AppID 1245620), iniciando o executável principal sem carregar o módulo EAC; modo online permanece indisponível no macOS/Wine
+- Perfil offline D3D12 para Elden Ring (AppID 1245620), iniciando o executável principal sem carregar o módulo EAC; modo online permanece indisponível no macOS/Wine
 - Atualizações automáticas via GitHub Releases com validação SHA-256
 - Correção automática da tela preta do Steam CEF no Apple Silicon
 - Wine Config
@@ -67,7 +68,7 @@ está documentado em `DEPLOY.md` e pode ser disparado com:
 
 ## Estado do projeto
 
-A engine DXMT usa Wine 11.8 Staging como base, com o adapter winemac necessário para criar superfícies Metal e DXMT 0.80 oficial. O renderer WineD3D usa a mesma base Wine sem o overlay DXMT.
+A engine DXMT usa Wine 11.8 Staging como base, com o adapter winemac necessário para criar superfícies Metal e DXMT 0.80 oficial. Jogos D3D12 podem usar o runtime VKD3D-Proton macOS v1.0 sobre MoltenVK. O renderer WineD3D usa a mesma base Wine sem o overlay DXMT.
 
 ## Terceiros
 

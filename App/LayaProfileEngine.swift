@@ -7,6 +7,8 @@ struct LayaGameProfile: Codable, Hashable {
         case dxmtMSync = "dxmt_msync"
         case dxmtForceD3D11 = "dxmt_force_d3d11"
         case dxmtMSyncForceD3D11 = "dxmt_msync_force_d3d11"
+        case vkd3dStandard = "vkd3d_standard"
+        case vkd3dMSync = "vkd3d_msync"
     }
 
     var appID: String
@@ -17,7 +19,11 @@ struct LayaGameProfile: Codable, Hashable {
     var createdAt: Date
 
     var msync: Bool {
-        kind == .dxmtMSync || kind == .dxmtMSyncForceD3D11
+        kind == .dxmtMSync || kind == .dxmtMSyncForceD3D11 || kind == .vkd3dMSync
+    }
+
+    var usesD3D12: Bool {
+        kind == .vkd3dStandard || kind == .vkd3dMSync
     }
 
     var launchArguments: [String] {
@@ -35,6 +41,8 @@ struct LayaGameProfile: Codable, Hashable {
         case .dxmtMSync: return "DXMT · MSync"
         case .dxmtForceD3D11: return "DXMT · D3D11"
         case .dxmtMSyncForceD3D11: return "DXMT · MSync · D3D11"
+        case .vkd3dStandard: return "D3D12 · VKD3D"
+        case .vkd3dMSync: return "D3D12 · VKD3D · MSync"
         }
     }
 }
@@ -95,7 +103,8 @@ enum LayaProfileEngine {
         gameName: String,
         renderer: Renderer,
         supportRoot: URL,
-        projectRoot: URL
+        projectRoot: URL,
+        graphicsAPI: String = "D3D11"
     ) throws -> LayaGameProfile {
         if !modelIsCached(supportRoot: supportRoot) {
             try ensureModelSpace(supportRoot: supportRoot)
@@ -116,7 +125,10 @@ enum LayaProfileEngine {
             "game": gameName,
             "steamAppID": appID,
             "renderer": renderer.rawValue,
-            "runtime": "Wine Staging 11.8 + DXMT 0.80",
+            "runtime": graphicsAPI == "D3D12"
+                ? "Wine Staging 11.8 + VKD3D-Proton macOS"
+                : "Wine Staging 11.8 + DXMT 0.80",
+            "graphicsAPI": graphicsAPI,
             "macModel": hardwareModel(),
             "memoryGB": Int(ProcessInfo.processInfo.physicalMemory / 1_073_741_824),
             "architecture": "Apple Silicon",

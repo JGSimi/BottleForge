@@ -16,6 +16,7 @@ required=(
   "$ROOT/Engine/wine-11.8-dxmt"
   "$ROOT/Engine/wine-11.8-wined3d"
   "$ROOT/Runtime/Laya"
+  "$ROOT/Runtime/D3D12"
 )
 
 for requiredPath in "${required[@]}"; do
@@ -51,6 +52,9 @@ ditto "$ROOT/Engine/wine-11.8-wined3d" "$ENGINES/wine-11.8-wined3d"
 
 echo "→ Copiando runtime Laya"
 ditto "$ROOT/Runtime/Laya" "$RESOURCES/LayaRuntime"
+
+echo "→ Copiando runtime D3D12"
+ditto "$ROOT/Runtime/D3D12" "$RESOURCES/D3D12Runtime"
 
 ditto "$ROOT/ThirdPartyLicenses" "$RESOURCES/Licenses"
 cp "$ROOT/THIRD_PARTY_NOTICES.md" "$RESOURCES/"

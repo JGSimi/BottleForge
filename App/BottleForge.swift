@@ -239,6 +239,13 @@ final class BottleStore: ObservableObject {
     }
     private var dxmtEngineRoot: URL { engineBaseRoot.appendingPathComponent("wine-11.8-dxmt") }
     private var wineD3DEngineRoot: URL { engineBaseRoot.appendingPathComponent("wine-11.8-wined3d") }
+    private var d3d12RuntimeRoot: URL {
+        if let resources = Bundle.main.resourceURL {
+            let bundled = resources.appendingPathComponent("D3D12Runtime")
+            if fm.fileExists(atPath: bundled.path) { return bundled }
+        }
+        return projectRoot.appendingPathComponent("Runtime/D3D12")
+    }
 
     private func engineRoot(for renderer: Renderer) -> URL {
         renderer == .dxmt ? dxmtEngineRoot : wineD3DEngineRoot
@@ -447,6 +454,11 @@ final class BottleStore: ObservableObject {
             return
         }
 
+        guard prepareD3D12Runtime(in: bottle) else {
+            status = "Runtime DirectX 12 não encontrado no BottleForge"
+            return
+        }
+
         do {
             try "1245620\n".write(
                 to: gameDir.appendingPathComponent("steam_appid.txt"),
@@ -460,26 +472,36 @@ final class BottleStore: ObservableObject {
 
         let launchWithProfile: (LayaGameProfile?) -> Void = { [weak self] profile in
             guard let self else { return }
-            guard let wine = self.wineURL(for: bottle.renderer) else {
+            guard let wine = self.wineURL(for: .dxmt) else {
                 self.status = "Engine Wine não encontrada"
                 return
             }
 
+            let shaderCache = self.supportRoot.appendingPathComponent("ShaderCache/\(appID)")
+            try? self.fm.createDirectory(at: shaderCache, withIntermediateDirectories: true)
+
             var overrides: [String: String] = [
                 "SteamAppId": appID,
-                "SteamGameId": appID
+                "SteamGameId": appID,
+                "WINEDLLOVERRIDES": "d3d12,d3d12core,dxgi=n,b",
+                "VK_ICD_FILENAMES": self.d3d12RuntimeRoot.appendingPathComponent("MoltenVK_icd.json").path,
+                "DYLD_LIBRARY_PATH": self.d3d12RuntimeRoot.path,
+                "DYLD_FALLBACK_LIBRARY_PATH": self.d3d12RuntimeRoot.path,
+                "MVK_PRESENT_MODE": "1",
+                "VKMT_ALLOW_NON_SINGLE_TEXEL_ALIGNMENT": "1",
+                "VKD3D_SHADER_CACHE_PATH": shaderCache.path
             ]
             if let profile {
                 overrides["WINEMSYNC"] = profile.msync ? "1" : "0"
             }
 
             self.status = profile == nil
-                ? "Abrindo Elden Ring · Offline"
-                : "Abrindo Elden Ring · Offline · Auto: \(profile!.displayName)"
+                ? "Abrindo Elden Ring · Offline · D3D12"
+                : "Abrindo Elden Ring · Offline · \(profile!.displayName)"
 
             self.runProcess(
                 wine,
-                args: [game.path] + (profile?.launchArguments ?? []),
+                args: [game.path],
                 bottle: bottle,
                 environmentOverrides: overrides,
                 workingDirectory: gameDir
@@ -488,25 +510,23 @@ final class BottleStore: ObservableObject {
                     self.status = "Elden Ring finalizado · Offline"
                 } else {
                     LayaProfileEngine.invalidate(appID: appID, supportRoot: self.supportRoot)
-                    self.status = "Elden Ring saiu com código \(code) · perfil Auto será recalculado"
+                    self.status = "Elden Ring saiu com código \(code) · perfil D3D12 será recalculado"
                 }
             }
         }
 
-        guard bottle.renderer == .dxmt else {
-            launchWithProfile(nil)
-            return
-        }
-
         if let profile = LayaProfileEngine.cachedProfile(appID: appID, supportRoot: supportRoot) {
-            launchWithProfile(profile)
-            return
+            if profile.usesD3D12 {
+                launchWithProfile(profile)
+                return
+            }
+            LayaProfileEngine.invalidate(appID: appID, supportRoot: supportRoot)
         }
 
         let firstRun = !LayaProfileEngine.modelIsCached(supportRoot: supportRoot)
         status = firstRun
-            ? "Preparando Elden Ring offline + otimização automática…"
-            : "Otimizando Elden Ring offline com Laya…"
+            ? "Preparando Elden Ring D3D12 + otimização automática…"
+            : "Otimizando Elden Ring D3D12 com Laya…"
         busy = true
 
         let supportRoot = supportRoot
@@ -516,9 +536,10 @@ final class BottleStore: ObservableObject {
                 let profile = try LayaProfileEngine.chooseProfile(
                     appID: appID,
                     gameName: app.name + " (offline, sem EAC)",
-                    renderer: bottle.renderer,
+                    renderer: .dxmt,
                     supportRoot: supportRoot,
-                    projectRoot: projectRoot
+                    projectRoot: projectRoot,
+                    graphicsAPI: "D3D12"
                 )
 
                 DispatchQueue.main.async {
@@ -528,10 +549,31 @@ final class BottleStore: ObservableObject {
             } catch {
                 DispatchQueue.main.async {
                     self?.busy = false
-                    self?.status = "Laya indisponível; abrindo Elden Ring offline com perfil padrão"
+                    self?.status = "Laya indisponível; abrindo Elden Ring D3D12 com perfil padrão"
                     launchWithProfile(nil)
                 }
             }
+        }
+    }
+
+    private func prepareD3D12Runtime(in bottle: Bottle) -> Bool {
+        let required = ["dxgi.dll", "d3d12.dll", "d3d12core.dll", "libMoltenVK.dylib", "MoltenVK_icd.json"]
+        guard required.allSatisfy({ fm.fileExists(atPath: d3d12RuntimeRoot.appendingPathComponent($0).path) }) else {
+            return false
+        }
+
+        let system32 = prefixURL(bottle).appendingPathComponent("drive_c/windows/system32")
+        do {
+            try fm.createDirectory(at: system32, withIntermediateDirectories: true)
+            for name in ["dxgi.dll", "d3d12.dll", "d3d12core.dll"] {
+                let source = d3d12RuntimeRoot.appendingPathComponent(name)
+                let target = system32.appendingPathComponent(name)
+                try? fm.removeItem(at: target)
+                try fm.copyItem(at: source, to: target)
+            }
+            return true
+        } catch {
+            return false
         }
     }
 

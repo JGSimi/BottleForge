@@ -40,6 +40,7 @@ Use esse comando somente para o BottleForge baixado da página oficial de Releas
 - Detectar apps e jogos instalados em cada bottle e abrir com um clique
 - Modo Auto com Laya local para escolher perfil por jogo (DXMT/MSync/D3D11)
 - Cache persistente de perfil por Steam AppID e fallback automático após falhas
+- Perfil offline para Elden Ring (AppID 1245620), iniciando o executável principal sem carregar o módulo EAC; modo online permanece indisponível no macOS/Wine
 - Atualizações automáticas via GitHub Releases com validação SHA-256
 - Correção automática da tela preta do Steam CEF no Apple Silicon
 - Wine Config

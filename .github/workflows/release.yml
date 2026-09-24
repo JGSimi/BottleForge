@@ -70,6 +70,15 @@ jobs:
           chmod +x Scripts/*.sh
           ./Scripts/bootstrap-laya.sh
 
+      - name: Bootstrap D3D12
+        shell: bash
+        run: |
+          if ! command -v zstd >/dev/null 2>&1; then
+            brew install zstd
+          fi
+          chmod +x Scripts/*.sh
+          ./Scripts/bootstrap-d3d12.sh
+
       - name: Install Steam compatibility compiler
         shell: bash
         run: |

@@ -51,7 +51,8 @@ enum PEGameInspector {
                 }
                 if name == "unityplayer.dll" { evidence.isUnity = true }
                 // Follow engine DLLs without scanning game assets or trusting arbitrary paths.
-                if !name.contains("/"), !name.contains("\\"), let dependency = localFiles[name] {
+                if !name.contains("/"), !name.contains("\\"), let dependency = localFiles[name],
+                   !seen.contains(dependency.standardizedFileURL.path), !pending.contains(dependency) {
                     pending.append(dependency)
                 }
             }
@@ -239,6 +240,7 @@ struct SteamGameSession {
     private(set) var started = false
     private var pids = Set<String>()
     private var failure: Int?
+    init(appID: String) { self.appID = appID }
     mutating func consume(_ chunk: String) -> Int? {
         for line in chunk.components(separatedBy: .newlines) {
             let lower = line.lowercased()

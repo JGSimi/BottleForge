@@ -756,10 +756,16 @@ final class BottleStore: ObservableObject {
                 return
             }
             // Never kill every process in the prefix just to bring Steam to the foreground.
-            if !wineSessionIsRunning(in: bottle) {
-                sessionProfiles[bottle.id] = bottle.renderer == .dxmt
-                    ? (bottle.msync ? .dxmtMSync : .dxmtStandard)
-                    : (bottle.msync ? .wineD3DMSync : .wineD3DStandard)
+            let expected: LayaGameProfile.Kind = bottle.renderer == .dxmt
+                ? (bottle.msync ? .dxmtMSync : .dxmtStandard)
+                : (bottle.msync ? .wineD3DMSync : .wineD3DStandard)
+            if wineSessionIsRunning(in: bottle) {
+                if let current = sessionProfiles[bottle.id], current.renderer != bottle.renderer {
+                    status = "Encerre os processos Wine antes de abrir a Steam com outro renderer"
+                    return
+                }
+            } else {
+                sessionProfiles[bottle.id] = expected
             }
         }
         guard prepareSteamCEFCompatibility(in: bottle) else {

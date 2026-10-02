@@ -100,7 +100,6 @@ private enum InstalledAppScanner {
                     icon: "play.rectangle.fill",
                     executable: steam,
                     arguments: ["-applaunch", appID],
-                    gameExecutable: bestExecutable(in: gameDir, appName: name),
                     gameDirectory: gameDir
                 ))
             }
@@ -160,7 +159,7 @@ private enum InstalledAppScanner {
         }
     }
 
-    private static func bestExecutable(in folder: URL, appName: String) -> URL? {
+    static func bestExecutable(in folder: URL, appName: String) -> URL? {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(
             at: folder,
@@ -443,7 +442,7 @@ final class BottleStore: ObservableObject {
             let appID = app.id.hasPrefix("steam:") ? String(app.id.dropFirst(6)) : nil
             launchGame(app.executable, arguments: app.arguments, displayName: app.name,
                        gameExecutable: app.gameExecutable ?? (appID == nil ? app.executable : nil),
-                       steamAppID: appID, in: bottle)
+                       gameDirectory: app.gameDirectory, steamAppID: appID, in: bottle)
         }
     }
 
@@ -469,7 +468,8 @@ final class BottleStore: ObservableObject {
 
     private func launchGame(
         _ executable: URL, arguments: [String], displayName: String,
-        gameExecutable: URL?, steamAppID: String? = nil, offline: Bool = false, in bottle: Bottle
+        gameExecutable: URL?, gameDirectory: URL? = nil,
+        steamAppID: String? = nil, offline: Bool = false, in bottle: Bottle
     ) {
         guard ensureRosettaAvailable(), !busy else { return }
         guard gameMonitors[bottle.id] == nil else {
@@ -479,7 +479,10 @@ final class BottleStore: ObservableObject {
         busy = true
         status = "Detectando compatibilidade de \(displayName)…"
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let evidence = gameExecutable.map { PEGameInspector.inspect(executable: $0) } ?? GameEvidence()
+            let target = gameExecutable ?? gameDirectory.flatMap {
+                InstalledAppScanner.bestExecutable(in: $0, appName: displayName)
+            }
+            let evidence = target.map { PEGameInspector.inspect(executable: $0) } ?? GameEvidence()
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.busy = false

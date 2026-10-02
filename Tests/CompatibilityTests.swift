@@ -1,7 +1,7 @@
 import Foundation
 
 func expect(_ value: @autoclosure () -> Bool, _ message: String) {
-    if !value() { fatalError(message) }
+    if !value() { fputs("FAIL: \(message)\n", stderr); exit(1) }
 }
 
 @main
@@ -13,6 +13,7 @@ struct CompatibilityTests {
         let old = GameEvidence(apis: [.d3d9], machine: .x86, isUnity: false)
         expect(GameCompatibility.candidates(evidence: old, renderer: .dxmt, msync: false, d3d12Available: true).first == .wineD3DStandard, "D3D9 needs WineD3D")
         let mixed = GameEvidence(apis: [.d3d11, .d3d12], machine: .x64, isUnity: false)
+        expect(GameCompatibility.candidates(evidence: mixed, renderer: .dxmt, msync: false, d3d12Available: true).first == .dxmtStandard, "Importing multiple APIs does not prove the game selects D3D12; preserve the requested baseline")
         expect(!GameCompatibility.candidates(evidence: mixed, renderer: .dxmt, msync: false, d3d12Available: true).contains(.dxmtForceD3D11), "Unity arguments must not be sent to arbitrary engines")
         let args = GameCompatibility.steamArguments(["-applaunch", "42", "-windowed"], profile: .dxmtForceD3D11)
         expect(args == ["-no-cef-sandbox", "-noverifyfiles", "-applaunch", "42", "-windowed", "-force-d3d11"], "Game arguments must follow AppID")

@@ -164,7 +164,8 @@ enum GameCompatibility {
             profiles.insert(contentsOf: [.dxmtForceD3D11, .dxmtMSyncForceD3D11], at: 2)
         }
         if d12 && d3d12Available && evidence.machine == .x64 {
-            profiles.insert(contentsOf: [.vkd3dStandard, .vkd3dMSync], at: 0)
+            // Multiple imports prove available APIs, not which one the game selects.
+            profiles.append(contentsOf: [.vkd3dStandard, .vkd3dMSync])
         } else if evidence.apis.isEmpty && d3d12Available && evidence.machine == .x64 {
             // Some games resolve graphics DLLs dynamically instead of listing PE imports.
             profiles.append(contentsOf: [.vkd3dStandard, .vkd3dMSync])

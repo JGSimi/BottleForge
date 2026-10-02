@@ -39,8 +39,9 @@ Use esse comando somente para o BottleForge baixado da página oficial de Releas
 - WineD3D como renderer alternativo
 - Executar instaladores e programas `.exe`
 - Detectar apps e jogos instalados em cada bottle e abrir com um clique
-- Modo Auto com Laya local para escolher perfil por jogo (DXMT/MSync/D3D11/D3D12)
-- Cache persistente de perfil por Steam AppID e fallback automático após falhas
+- Modo Auto por API gráfica detectada nos imports PE e DLLs locais (DXMT/MSync/D3D11/D3D12/WineD3D)
+- Histórico persistente por bottle e jogo: após uma falha confirmada, a próxima abertura tenta outro perfil compatível
+- Detecção de jogos em bibliotecas adicionais da Steam
 - Perfil offline D3D12 para Elden Ring (AppID 1245620), iniciando o executável principal sem carregar o módulo EAC; modo online permanece indisponível no macOS/Wine
 - Atualizações automáticas via GitHub Releases com validação SHA-256
 - Correção automática da tela preta do Steam CEF no Apple Silicon
@@ -55,7 +56,26 @@ O app principal fica em `App/BottleForge.swift` e o sistema de atualização em 
 
 As engines não são versionadas no Git devido ao tamanho. A distribuição Full publicada em Releases contém os runtimes necessários dentro do próprio `.app`.
 
-O runtime do Laya é empacotado com Node.js arm64 e ONNX Runtime. Os pesos do modelo (~1,7 GB) são baixados uma única vez no primeiro jogo otimizado e ficam em `~/Library/Application Support/BottleForge/AI/Laya`; atualizações do app reutilizam esse cache.
+O modo Auto usa detecção local e não exige baixar um modelo. Sugestões Laya já armazenadas podem priorizar um perfil, desde que ele seja compatível com a API detectada; perfis que falharam continuam excluídos. O runtime Laya permanece disponível para desenvolvimento, com cache em `~/Library/BottleForge/AI/Laya`.
+
+## Seleção e limites de compatibilidade
+
+O BottleForge examina as tabelas de imports normais e atrasados do executável e até 64 DLLs locais. D3D10/11 priorizam DXMT, D3D9 e APIs legadas usam WineD3D, e D3D12 em executáveis x64 usa VKD3D quando o runtime está disponível. A flag `-force-d3d11` só é candidata para Unity com evidência de D3D11. Na Steam, as opções do jogo seguem `-applaunch <AppID>`.
+
+Isso amplia a compatibilidade, mas não permite garantir **qualquer jogo**: drivers Windows, anti-cheat, recursos gráficos ausentes e requisitos do hardware continuam impondo limites. Imports também não revelam todas as APIs carregadas dinamicamente, e a seleção do executável principal da Steam é uma heurística. A tradução D3D10/11 está descrita no [projeto DXMT](https://github.com/3Shain/dxmt), e as flags do Unity na [documentação oficial](https://docs.unity.com/en-us/engine/6000.6/manual/unity-editor/command-line-arguments/player).
+
+Se o perfil escolhido exigir outro renderer ou outro estado de MSync, use **Encerrar** na bottle antes de abrir o jogo: a Steam já em execução mantém o ambiente antigo. O app não encerra automaticamente outros jogos para trocar o perfil. As DLLs D3D12 são preparadas com staging e backup dos arquivos anteriores em `prefix/BottleForgeRuntime/original-system32`; DXMT e WineD3D usam overrides builtin para não carregar o DXGI nativo de outra tentativa.
+
+Falhas confirmadas por código de saída ficam em `~/Library/BottleForge/Compatibility/<bottle-id>`. A Steam é monitorada por seus processos filhos; falta de telemetria não conta como falha de renderer. Jogos encerrados pelo botão **Encerrar** não penalizam o perfil. Não há reinício automático de jogos após crashes. Quando os perfis se esgotarem, consulte `~/Library/BottleForge/Logs` e use **Redefinir perfis de compatibilidade** para tentar novamente após corrigir dependências ou configurações. Alterações do executável, runtime ou configuração da bottle invalidam o histórico correspondente.
+
+Para validar o algoritmo e compilar o app sem baixar os runtimes:
+
+```bash
+zsh Scripts/test-compatibility.sh
+xcrun swiftc -parse-as-library -typecheck App/*.swift
+mkdir -p build
+xcrun swiftc -parse-as-library -target arm64-apple-macos14.0 App/*.swift -o build/BottleForge
+```
 
 ## Releases e atualização
 

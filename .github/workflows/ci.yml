@@ -16,6 +16,9 @@ jobs:
       - name: Typecheck Swift
         run: xcrun swiftc -parse-as-library -typecheck App/*.swift
 
+      - name: Test compatibility selection
+        run: zsh Scripts/test-compatibility.sh
+
       - name: Validate scripts
         run: |
           chmod +x Scripts/*.sh
@@ -25,3 +28,4 @@ jobs:
           zsh -n Scripts/build-app.sh
           zsh -n Scripts/package-dmg.sh
           zsh -n Scripts/release.sh
+          zsh -n Scripts/test-compatibility.sh

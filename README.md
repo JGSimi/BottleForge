@@ -86,6 +86,18 @@ está documentado em `DEPLOY.md` e pode ser disparado com:
 ./Scripts/release.sh v0.1.1-alpha
 ```
 
+O app procura **releases publicadas com DMG**, não commits na `main`. Fazer merge de um PR não publica uma versão instalável. Use **Atualizações** no rodapé para abrir o resultado da consulta, incluindo erros de rede; verificações automáticas acontecem na abertura e ao voltar ao primeiro plano. A instalação depende do botão **Atualizar agora**.
+
+O updater valida tamanho e SHA-256 (digest do GitHub ou `SHA256SUMS.txt`), assinatura, identidade e versão do app. A nova cópia é preparada antes de solicitar o encerramento do BottleForge. A versão anterior permanece disponível para restauração se a substituição falhar. Resultados e logs persistem em `~/Library/BottleForge/Updates`; a tela de atualização permite abri-los.
+
+Para testar consulta, integridade e instalação com um DMG de teste assinado, sem baixar engines:
+
+```bash
+zsh Scripts/test-updates.sh
+```
+
+Os testes de instalação usam apps descartáveis em uma pasta temporária e cobrem sucesso, rejeição de versão incorreta e rollback após corrupção da cópia preparada.
+
 ## Estado do projeto
 
 A engine DXMT usa Wine 11.8 Staging como base, com o adapter winemac necessário para criar superfícies Metal e DXMT 0.80 oficial. Jogos D3D12 podem usar o runtime VKD3D-Proton macOS v1.0 sobre MoltenVK. O renderer WineD3D usa a mesma base Wine sem o overlay DXMT.

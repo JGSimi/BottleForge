@@ -12,10 +12,18 @@ cleanup() {
 trap cleanup EXIT
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
+cat > "$TEST_ROOT/Fixture.swift" <<'SWIFT'
+import Foundation
+let bundle = Bundle.main
+let marker = bundle.bundleURL.deletingLastPathComponent().appendingPathComponent("launched.txt")
+let tag = bundle.object(forInfoDictionaryKey: "BottleForgeReleaseTag") as? String ?? "unknown"
+try tag.write(to: marker, atomically: true, encoding: .utf8)
+SWIFT
+xcrun swiftc "$TEST_ROOT/Fixture.swift" -o "$TEST_ROOT/Fixture"
 make_app() {
   local app="$1" tag="$2"
   mkdir -p "$app/Contents/MacOS"
-  cp /usr/bin/true "$app/Contents/MacOS/BottleForge"
+  cp "$TEST_ROOT/Fixture" "$app/Contents/MacOS/BottleForge"
   cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -59,6 +67,14 @@ stop_fixture() {
   RUN_PID=""
 }
 installed_tag() { /usr/libexec/PlistBuddy -c 'Print :BottleForgeReleaseTag' "$1/Contents/Info.plist"; }
+verify_launch() {
+  local marker="$PARENT/launched.txt"
+  for _ in {1..100}; do
+    if [[ -f "$marker" && "$(cat "$marker")" == v0.1.12-alpha ]]; then return 0; fi
+    sleep 0.1
+  done
+  fail "Installed/restored app did not actually launch"
+}
 
 PARENT="$TEST_ROOT/Apps with spaces'quotes"
 TARGET="$PARENT/BottleForge.app"
@@ -77,6 +93,7 @@ INSTALL_PID=""
 [[ "$(installed_tag "$TARGET")" == v0.1.12-alpha ]] || fail "New version was not installed"
 codesign --verify --deep --strict "$TARGET"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :code' "$TEST_ROOT/state/success/result.plist")" == 0 ]] || fail "Success was not persisted"
+verify_launch
 
 # A mismatched release must fail before requesting shutdown or replacing the app.
 make_image "$TEST_ROOT/wrong-tag.dmg"
@@ -89,6 +106,7 @@ stop_fixture
 [[ "$(installed_tag "$TARGET")" == v0.1.12-alpha ]] || fail "Preflight failure changed the installed app"
 
 # Corrupt the staged copy after verification, reproducing a post-swap failure.
+rm -f "$PARENT/launched.txt"
 make_image "$TEST_ROOT/rollback.dmg"
 launch_installer "$TEST_ROOT/rollback.dmg" "$TARGET" v0.1.12-alpha "$TEST_ROOT/state/rollback"
 wait_for_ready "$TEST_ROOT/state/rollback"
@@ -101,4 +119,5 @@ INSTALL_PID=""
 [[ "$(installed_tag "$TARGET")" == v0.1.12-alpha ]] || fail "Rollback did not restore the previous version"
 codesign --verify --deep --strict "$TARGET"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :code' "$TEST_ROOT/state/rollback/result.plist")" != 0 ]] || fail "Rollback failure was not persisted"
+verify_launch
 echo "Real DMG installation, preflight rejection and rollback tests passed"

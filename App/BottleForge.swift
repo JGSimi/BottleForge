@@ -217,7 +217,10 @@ final class BottleStore: ObservableObject {
     @Published var rosettaInstalling = false
     private let fm = FileManager.default
     private var supportRoot: URL {
-        fm.homeDirectoryForCurrentUser
+        if let override = ProcessInfo.processInfo.environment["BOTTLEFORGE_SUPPORT_ROOT"], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        return fm.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/BottleForge")
     }
     private var bottlesRoot: URL { supportRoot.appendingPathComponent("Bottles") }
@@ -1211,9 +1214,11 @@ struct ContentView: View {
                     .font(.caption)
                 } else {
                     Button {
+                        showingUpdate = true
                         updater.checkForUpdates()
                     } label: {
-                        Image(systemName: updater.isChecking ? "clock" : "arrow.clockwise")
+                        Label(updater.isChecking ? "Verificando…" : "Atualizações",
+                              systemImage: updater.errorMessage != nil ? "exclamationmark.triangle" : "arrow.clockwise")
                     }
                     .buttonStyle(.borderless)
                     .help("Verificar atualizações")
@@ -1455,15 +1460,16 @@ struct UpdateView: View {
                         updater.installAvailableUpdate()
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(updater.isDownloading)
+                    .disabled(updater.isDownloading || updater.isChecking)
                 }
             } else {
                 VStack(spacing: 14) {
-                    Image(systemName: "checkmark.circle")
+                    Image(systemName: updater.errorMessage == nil ? "checkmark.circle" : "exclamationmark.triangle")
                         .font(.system(size: 36))
                         .foregroundStyle(.secondary)
 
-                    Text(updater.isChecking ? "Verificando atualizações…" : "Nenhuma atualização disponível")
+                    Text(updater.isChecking ? "Verificando atualizações…"
+                         : (updater.errorMessage == nil ? "Nenhuma atualização disponível" : "Não foi possível verificar"))
                         .font(.headline)
 
                     if let status = updater.statusMessage {
@@ -1486,6 +1492,13 @@ struct UpdateView: View {
                     .font(.caption)
                     .foregroundStyle(.red)
             }
+            if let result = updater.lastInstallationResult {
+                Text(result.message)
+                    .font(.caption)
+                    .foregroundStyle(result.code == 0 ? Color.secondary : Color.red)
+            }
+            Button("Abrir logs de atualização") { updater.revealUpdateLogs() }
+                .font(.caption)
         }
         .padding(24)
         .frame(width: 520)

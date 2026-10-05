@@ -19,6 +19,9 @@ jobs:
       - name: Test compatibility selection
         run: zsh Scripts/test-compatibility.sh
 
+      - name: Test updater and real DMG installation
+        run: zsh Scripts/test-updates.sh
+
       - name: Validate scripts
         run: |
           chmod +x Scripts/*.sh
@@ -29,3 +32,5 @@ jobs:
           zsh -n Scripts/package-dmg.sh
           zsh -n Scripts/release.sh
           zsh -n Scripts/test-compatibility.sh
+          zsh -n Scripts/test-updates.sh
+          zsh -n Scripts/test-update-installer.sh

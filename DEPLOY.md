@@ -14,6 +14,8 @@ O deploy é baseado em tags Git e GitHub Actions.
 
 O script valida o Swift, envia a `main`, cria a tag e envia a tag ao GitHub.
 A tag dispara `.github/workflows/release.yml`.
+
+Um merge na `main` que não altera `.release-tag` **não gera release**. O updater consulta exclusivamente releases com o DMG correspondente. Para disponibilizar as correções aos apps instalados, publique uma nova tag pelo fluxo acima ou altere `.release-tag` para uma versão nova.
 ## O que o GitHub Actions faz
 
 - executa `Scripts/bootstrap-engines.sh`;
@@ -41,8 +43,11 @@ Quando encontra uma versão superior:
 - baixa o DMG oficial do GitHub;
 - valida o SHA-256 publicado no asset;
 - valida a assinatura do novo `.app`;
-- substitui a instalação atual;
+- prepara e verifica a nova cópia antes de encerrar o app;
+- substitui a instalação mantendo a versão anterior para rollback em caso de falha;
 - relança o BottleForge.
+
+Consultas manuais abrem a tela **Atualizações** e mostram tanto o resultado quanto erros de rede. O download exige tamanho e SHA-256 corretos; na ausência do digest da API, usa `SHA256SUMS.txt`. Resultados e logs de cada tentativa ficam em `~/Library/BottleForge/Updates`, inclusive se o app já tiver encerrado.
 
 Builds alpha/beta/rc aceitam prereleases. Uma build estável ignora prereleases.
 ## Próxima otimização

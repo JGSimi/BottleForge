@@ -501,7 +501,8 @@ final class BottleStore: ObservableObject {
         steamAppID: String?, offline: Bool, in bottle: Bottle
     ) {
         var candidates = GameCompatibility.candidates(evidence: evidence, renderer: bottle.renderer,
-                                                      msync: bottle.msync, d3d12Available: d3d12RuntimeAvailable)
+                                                      msync: bottle.msync, d3d12Available: d3d12RuntimeAvailable,
+                                                      steamAppID: steamAppID)
         candidates.removeAll { wineURL(for: $0.renderer) == nil }
         guard !candidates.isEmpty else {
             status = evidence.machine == .arm64
@@ -536,6 +537,21 @@ final class BottleStore: ObservableObject {
             status = "Não foi possível preparar o runtime DirectX 12"
             return
         }
+        // A direct Steamworks game still needs the Windows Steam client in this same prefix.
+        // Let the user finish login before attempting the offline executable.
+        if offline && !running {
+            guard let steam = installedApps(in: bottle).first(where: { $0.id == "steam" }),
+                  let wine = wineURL(for: effectiveBottle.renderer) else {
+                status = "Abra a Steam desta bottle e entre na conta antes de iniciar o jogo offline"
+                return
+            }
+            sessionProfiles[bottle.id] = kind
+            if launchSteam(steam.executable, arguments: [], displayName: "Steam", wine: wine,
+                           bottle: effectiveBottle, profile: profile, attempt: nil, monitorToken: nil) {
+                status = "Steam iniciada com \(profile.displayName). Aguarde o login e abra \(displayName) novamente"
+            }
+            return
+        }
         let token = GameMonitorToken()
         gameMonitors[bottle.id] = token
         sessionProfiles[bottle.id] = kind
@@ -560,7 +576,7 @@ final class BottleStore: ObservableObject {
             return "\(url.path):\(values?.fileSize ?? 0):\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
         }
         let release = Bundle.main.object(forInfoDictionaryKey: "BottleForgeReleaseTag") as? String ?? "development"
-        return (["policy-1", release, bottle.renderer.rawValue, String(bottle.msync), evidence.fingerprint] + stamps).joined(separator: "|")
+        return (["policy-2", release, bottle.renderer.rawValue, String(bottle.msync), evidence.fingerprint] + stamps).joined(separator: "|")
     }
 
     // `wineserver -w` only waits for the prefix server; cancelling this probe does not kill games.
@@ -708,17 +724,27 @@ final class BottleStore: ObservableObject {
             overrides["SteamGameId"] = appID
         }
         let log = processDiagnosticURL(in: bottle)
+        var startedAt: Date?
         status = "Abrindo \(displayName) · \(profile?.displayName ?? bottle.renderer.rawValue)…"
         runProcess(wine, args: [executable.path] + arguments + (profile?.launchArguments ?? []), bottle: bottle,
-                   environmentOverrides: overrides, workingDirectory: executable.deletingLastPathComponent(), logURL: log) { code in
+                   environmentOverrides: overrides, workingDirectory: executable.deletingLastPathComponent(), logURL: log,
+                   didStart: { startedAt = Date() }) { code in
             guard monitorToken?.isCancelled != true else { return }
             self.gameMonitors[bottle.id] = nil
+            let elapsed = startedAt.map { Date().timeIntervalSince($0) } ?? 0
+            let outcome = DirectGameExit.classify(code: code, elapsed: elapsed)
             if let attempt {
-                self.history.record(key: attempt.key, fingerprint: attempt.fingerprint,
-                                    profile: attempt.profile.kind, succeeded: code == 0)
+                if outcome != .unconfirmed {
+                    self.history.record(key: attempt.key, fingerprint: attempt.fingerprint,
+                                        profile: attempt.profile.kind, succeeded: outcome == .completed)
+                }
             }
-            self.status = code == 0 ? "\(displayName) finalizado"
-                : "\(displayName) saiu com código \(code) · consulte \(log.lastPathComponent); outro perfil na próxima abertura"
+            if attempt != nil && outcome == .unconfirmed {
+                self.status = "\(displayName) encerrou em \(Int(elapsed))s (código 0); abertura não confirmada · consulte \(log.lastPathComponent)"
+            } else {
+                self.status = code == 0 ? "\(displayName) finalizado"
+                    : "\(displayName) saiu com código \(code) · consulte \(log.lastPathComponent); outro perfil na próxima abertura"
+            }
         }
     }
 
@@ -751,24 +777,25 @@ final class BottleStore: ObservableObject {
         executable.lastPathComponent.caseInsensitiveCompare("Steam.exe") == .orderedSame
     }
 
+    @discardableResult
     private func launchSteam(
         _ executable: URL, arguments: [String], displayName: String, wine: URL,
         bottle: Bottle, profile: LayaGameProfile?, attempt: CompatibilityAttempt?, monitorToken: GameMonitorToken?
-    ) {
+    ) -> Bool {
         let isGame = arguments.contains("-applaunch")
         if !isGame {
             guard gameMonitors[bottle.id] == nil else {
                 status = "Encerre o jogo antes de reiniciar a Steam"
-                return
+                return false
             }
             // Never kill every process in the prefix just to bring Steam to the foreground.
-            let expected: LayaGameProfile.Kind = bottle.renderer == .dxmt
+            let expected: LayaGameProfile.Kind = profile?.kind ?? (bottle.renderer == .dxmt
                 ? (bottle.msync ? .dxmtMSync : .dxmtStandard)
-                : (bottle.msync ? .wineD3DMSync : .wineD3DStandard)
+                : (bottle.msync ? .wineD3DMSync : .wineD3DStandard))
             if wineSessionIsRunning(in: bottle) {
                 if let current = sessionProfiles[bottle.id], current.renderer != bottle.renderer {
                     status = "Encerre os processos Wine antes de abrir a Steam com outro renderer"
-                    return
+                    return false
                 }
             } else {
                 sessionProfiles[bottle.id] = expected
@@ -777,7 +804,7 @@ final class BottleStore: ObservableObject {
         guard prepareSteamCEFCompatibility(in: bottle) else {
             gameMonitors[bottle.id] = nil
             status = "Não foi possível preparar a interface da Steam"
-            return
+            return false
         }
         let processLog = executable.deletingLastPathComponent().appendingPathComponent("logs/gameprocess_log.txt")
         let baseline = (try? processLog.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
@@ -800,10 +827,13 @@ final class BottleStore: ObservableObject {
                     self.status = "Steam saiu com código \(code) · consulte \(log.lastPathComponent)"
                 }
             } else {
-                self.status = code == 0 ? "Steam finalizado" : "Steam saiu com código \(code)"
+                self.status = code == 0
+                    ? (profile != nil ? "Steam preparada. Aguarde o login e abra o jogo offline novamente" : "Steam finalizado")
+                    : "Steam saiu com código \(code) · consulte \(log.lastPathComponent)"
             }
         }
         scheduleSteamBootstrapGuardRemoval(in: bottle)
+        return true
     }
 
     private func prepareSteamCEFCompatibility(in bottle: Bottle) -> Bool {
@@ -976,6 +1006,10 @@ final class BottleStore: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([drive])
     }
 
+    func revealExecutionLogs() {
+        NSWorkspace.shared.open(logsRoot)
+    }
+
     func delete(_ bottle: Bottle) {
         gameMonitors.removeValue(forKey: bottle.id)?.cancel()
         sessionProfiles[bottle.id] = nil
@@ -1081,6 +1115,7 @@ final class BottleStore: ObservableObject {
         for (key, value) in environmentOverrides {
             env[key] = value
         }
+        let release = Bundle.main.object(forInfoDictionaryKey: "BottleForgeReleaseTag") as? String ?? "development"
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process()
             process.executableURL = executable
@@ -1091,16 +1126,24 @@ final class BottleStore: ObservableObject {
             if let logURL, FileManager.default.createFile(atPath: logURL.path, contents: nil) {
                 logHandle = try? FileHandle(forWritingTo: logURL)
             }
+            let settings = ["WINEPREFIX", "WINEDLLOVERRIDES", "WINEMSYNC", "SteamAppId", "VK_ICD_FILENAMES"]
+                .compactMap { key in env[key].map { "\(key)=\($0)" } }.joined(separator: "\n")
+            let header = "BottleForge: \(release)\nExecutable: \(executable.path)\nArguments: \(args)\nWorking directory: \(workingDirectory?.path ?? "inherited")\n\(settings)\n--- Process output ---\n"
+            try? logHandle?.write(contentsOf: Data(header.utf8))
             process.standardOutput = logHandle ?? FileHandle.nullDevice
             process.standardError = logHandle ?? FileHandle.nullDevice
             defer { try? logHandle?.close() }
             do {
                 try process.run()
+                let startedAt = Date()
                 DispatchQueue.main.async { didStart?() }
                 process.waitUntilExit()
                 let code = process.terminationStatus
+                let ending = "\n--- Process exit ---\nCode: \(code)\nReason: \(process.terminationReason == .uncaughtSignal ? "signal" : "exit")\nElapsed seconds: \(String(format: "%.2f", Date().timeIntervalSince(startedAt)))\n"
+                try? logHandle?.write(contentsOf: Data(ending.utf8))
                 DispatchQueue.main.async { completion(code) }
             } catch {
+                try? logHandle?.write(contentsOf: Data("\nLaunch error: \(error.localizedDescription)\n".utf8))
                 DispatchQueue.main.async {
                     self.gameMonitors.removeValue(forKey: bottle.id)?.cancel()
                     self.status = "Erro: \(error.localizedDescription)"
@@ -1274,6 +1317,7 @@ struct BottleDetail: View {
                     Button("Redefinir perfis de compatibilidade") {
                         store.resetCompatibility(in: bottle)
                     }
+                    Button("Abrir logs de execução") { store.revealExecutionLogs() }
                 }
 
                 Button("Excluir bottle", role: .destructive) {
@@ -1553,7 +1597,9 @@ struct CreateBottleView: View {
     }
 }
 
+#if !BOTTLEFORGE_LAUNCHER_TESTS
 @main
+#endif
 struct BottleForgeApp: App {
     @StateObject private var store = BottleStore()
     @StateObject private var updater = UpdateManager()

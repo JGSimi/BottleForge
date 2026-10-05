@@ -60,6 +60,10 @@ O modo Auto usa detecção local e não exige baixar um modelo. Sugestões Laya 
 
 ## Seleção e limites de compatibilidade
 
+No Elden Ring, o requisito D3D12 prevalece sobre imports mistos de DLLs. Se a bottle estiver encerrada, a primeira abertura prepara a Steam com o mesmo perfil; aguarde o login e abra o jogo novamente pela lista do BottleForge. O modo offline do jogo ainda precisa do cliente Steam da mesma bottle em execução. Se ele encerrar imediatamente, a tentativa não é gravada como perfil bem-sucedido. Use **Abrir logs de execução** para ver o comando, a configuração gráfica, a duração e o código de saída.
+
+Os requisitos D3D12 estão na [página oficial do Elden Ring](https://en.bandainamcoent.eu/elden-ring/elden-ring), e a dependência do cliente Steam está na [documentação de inicialização do Steamworks](https://partner.steamgames.com/doc/sdk/api#initialization_and_shutdown).
+
 O BottleForge examina as tabelas de imports normais e atrasados do executável e até 64 DLLs locais. D3D10/11 priorizam DXMT, D3D9 e APIs legadas usam WineD3D, e D3D12 em executáveis x64 usa VKD3D quando o runtime está disponível. A flag `-force-d3d11` só é candidata para Unity com evidência de D3D11. Na Steam, as opções do jogo seguem `-applaunch <AppID>`.
 
 Isso amplia a compatibilidade, mas não permite garantir **qualquer jogo**: drivers Windows, anti-cheat, recursos gráficos ausentes e requisitos do hardware continuam impondo limites. Imports também não revelam todas as APIs carregadas dinamicamente, e a seleção do executável principal da Steam é uma heurística. A tradução D3D10/11 está descrita no [projeto DXMT](https://github.com/3Shain/dxmt), e as flags do Unity na [documentação oficial](https://docs.unity.com/en-us/engine/6000.6/manual/unity-editor/command-line-arguments/player).
@@ -72,6 +76,7 @@ Para validar o algoritmo e compilar o app sem baixar os runtimes:
 
 ```bash
 zsh Scripts/test-compatibility.sh
+zsh Scripts/test-launcher.sh
 xcrun swiftc -parse-as-library -typecheck App/*.swift
 mkdir -p build
 xcrun swiftc -parse-as-library -target arm64-apple-macos14.0 App/*.swift -o build/BottleForge

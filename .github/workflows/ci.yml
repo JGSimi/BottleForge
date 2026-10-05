@@ -19,6 +19,9 @@ jobs:
       - name: Test compatibility selection
         run: zsh Scripts/test-compatibility.sh
 
+      - name: Test offline launcher subprocesses
+        run: zsh Scripts/test-launcher.sh
+
       - name: Test updater and real DMG installation
         run: zsh Scripts/test-updates.sh
 
@@ -32,5 +35,6 @@ jobs:
           zsh -n Scripts/package-dmg.sh
           zsh -n Scripts/release.sh
           zsh -n Scripts/test-compatibility.sh
+          zsh -n Scripts/test-launcher.sh
           zsh -n Scripts/test-updates.sh
           zsh -n Scripts/test-update-installer.sh

@@ -1,0 +1,103 @@
+import Foundation
+
+@main
+struct LauncherTests {
+    @MainActor
+    static func main() async throws {
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["BOTTLEFORGE_SUPPORT_ROOT"]!)
+        let resources = Bundle.main.resourceURL!
+        let bottle = Bottle(id: UUID(), name: "Launcher fixture", renderer: .dxmt, msync: false, createdAt: Date())
+        let directory = root.appendingPathComponent("Bottles/\(bottle.id)")
+        let prefix = directory.appendingPathComponent("prefix")
+        let steam = prefix.appendingPathComponent("drive_c/Program Files (x86)/Steam")
+        let gameDir = steam.appendingPathComponent("steamapps/common/ELDEN RING/Game")
+        let engine = resources.appendingPathComponent("Engines/wine-11.8-dxmt/bin")
+        let runtime = resources.appendingPathComponent("D3D12Runtime")
+        let wrapper = resources.appendingPathComponent("SteamCompat/steamwebhelper-wrapper.exe")
+        try fm.createDirectory(at: gameDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: engine, withIntermediateDirectories: true)
+        try fm.createDirectory(at: runtime, withIntermediateDirectories: true)
+        try fm.createDirectory(at: wrapper.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(bottle).write(to: directory.appendingPathComponent("bottle.json"))
+        try Data("client fixture".utf8).write(to: steam.appendingPathComponent("Steam.exe"))
+        let cef = steam.appendingPathComponent("bin/cef/cef.win64")
+        try fm.createDirectory(at: cef, withIntermediateDirectories: true)
+        try Data("original helper".utf8).write(to: cef.appendingPathComponent("steamwebhelper_real.exe"))
+        try Data("wrapper fixture".utf8).write(to: wrapper)
+        for name in ["dxgi.dll", "d3d12.dll", "d3d12core.dll", "libMoltenVK.dylib", "MoltenVK_icd.json"] {
+            try Data("runtime fixture".utf8).write(to: runtime.appendingPathComponent(name))
+        }
+        // A valid PE32+ x64 image with no graphics imports: known AppID must still select D3D12.
+        var pe = Data(repeating: 0, count: 512)
+        pe[0] = 0x4d; pe[1] = 0x5a; pe[0x3c] = 0x80
+        pe[0x80] = 0x50; pe[0x81] = 0x45
+        pe[0x84] = 0x64; pe[0x85] = 0x86; pe[0x94] = 240
+        pe[0x98] = 0x0b; pe[0x99] = 0x02
+        try pe.write(to: gameDir.appendingPathComponent("eldenring.exe"))
+        // Disposable subprocesses model the Steam/Wine boundary; no actual game, user data or engine.
+        try script("""
+        #!/bin/zsh
+        if [[ "$1" == *Steam.exe ]]; then
+          /usr/bin/touch "$WINEPREFIX/steam-running"
+          print 'STEAM_CLIENT_FIXTURE'
+        else
+          print 'GAME_EARLY_EXIT_FIXTURE'
+          print "SteamAppId=$SteamAppId"
+          print "Overrides=$WINEDLLOVERRIDES"
+        fi
+        exit 0
+        """, at: engine.appendingPathComponent("wine"))
+        try script("""
+        #!/bin/zsh
+        if [[ "$1" == '-w' && -e "$WINEPREFIX/steam-running" ]]; then
+          exec /bin/sleep 2
+        fi
+        exit 0
+        """, at: engine.appendingPathComponent("wineserver"))
+        let store = BottleStore()
+        let app = InstalledApp(id: "steam:1245620", name: "Elden Ring", detail: "Offline", icon: "",
+                               executable: steam.appendingPathComponent("Steam.exe"), arguments: ["-applaunch", "1245620"],
+                               gameDirectory: gameDir.deletingLastPathComponent())
+        store.runInstalledApp(app, in: bottle)
+        try await wait("Steam preparation", diagnostic: { store.status + "\n" + logs(root) }) {
+            logs(root).contains("STEAM_CLIENT_FIXTURE") && store.status.contains("Aguarde o login")
+        }
+        check(!logs(root).contains("GAME_EARLY_EXIT_FIXTURE"), "Cold launch must prepare Steam before running the offline game")
+        check(try String(contentsOf: prefix.appendingPathComponent("drive_c/windows/system32/d3d12.dll"), encoding: .utf8) == "runtime fixture", "D3D12 must be installed before Steam starts")
+        store.runInstalledApp(app, in: bottle)
+        try await wait("Early game exit", diagnostic: { store.status + "\n" + logs(root) }) { store.status.contains("abertura não confirmada") }
+        let output = logs(root)
+        check(output.contains("GAME_EARLY_EXIT_FIXTURE") && output.contains("SteamAppId=1245620"), "After Steam preparation the correct offline game must start")
+        check(output.contains("Overrides=d3d12,d3d12core,dxgi=n,b"), "Game must receive the D3D12 overrides")
+        check(output.contains("Code: 0") && output.contains("Elapsed seconds:") && output.contains("Working directory:"), "Diagnostics must preserve command, timing and exit code")
+        let historyFiles = (fm.enumerator(at: root.appendingPathComponent("Compatibility"), includingPropertiesForKeys: nil)?.allObjects as? [URL]) ?? []
+        check(!historyFiles.contains { $0.pathExtension == "json" }, "An immediate zero exit must not persist a successful profile")
+        try fm.removeItem(at: prefix.appendingPathComponent("steam-running"))
+        try fm.removeItem(at: cef.appendingPathComponent("steamwebhelper_real.exe"))
+        store.runInstalledApp(app, in: bottle)
+        try await wait("Missing Steam helper", diagnostic: { store.status + "\n" + logs(root) }) { store.status.contains("Não foi possível preparar a interface da Steam") }
+        check(!store.status.contains("Steam iniciada"), "Steam preparation failure must not be overwritten by a success message")
+        print("Launcher subprocess tests passed")
+    }
+
+    static func script(_ text: String, at url: URL) throws {
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+    }
+    static func logs(_ root: URL) -> String {
+        let files = (try? FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("Logs"), includingPropertiesForKeys: nil)) ?? []
+        return files.compactMap { try? String(contentsOf: $0, encoding: .utf8) }.joined(separator: "\n")
+    }
+    @MainActor
+    static func wait(_ name: String, diagnostic: () -> String, _ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(10)
+        while !condition() {
+            if Date() > deadline { fatalError("\(name): launcher did not reach the expected state: \(diagnostic())") }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+    static func check(_ condition: Bool, _ message: String) {
+        if !condition { fatalError(message) }
+    }
+}

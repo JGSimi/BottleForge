@@ -147,8 +147,13 @@ enum PEGameInspector {
 }
 
 enum GameCompatibility {
-    static func candidates(evidence: GameEvidence, renderer: Renderer, msync: Bool, d3d12Available: Bool) -> [LayaGameProfile.Kind] {
+    static func candidates(evidence: GameEvidence, renderer: Renderer, msync: Bool, d3d12Available: Bool, steamAppID: String? = nil) -> [LayaGameProfile.Kind] {
         guard evidence.machine != .arm64 else { return [] }
+        // Elden Ring has a documented D3D12 requirement; DLL imports can also contain D3D11.
+        if steamAppID == "1245620" {
+            guard d3d12Available && evidence.machine == .x64 else { return [] }
+            return msync ? [.vkd3dMSync, .vkd3dStandard] : [.vkd3dStandard, .vkd3dMSync]
+        }
         let modern = evidence.apis.contains(.d3d10) || evidence.apis.contains(.d3d11)
         let d12 = evidence.apis.contains(.d3d12)
         if d12 && !modern {
@@ -180,6 +185,16 @@ enum GameCompatibility {
         }
         let extra = profile?.gameArguments.filter { !arguments.dropFirst(index + 2).contains($0) } ?? []
         return client + arguments + extra
+    }
+}
+
+enum DirectGameExit: Equatable {
+    case completed, failed, unconfirmed
+
+    static func classify(code: Int32, elapsed: TimeInterval) -> Self {
+        if code != 0 { return .failed }
+        // A launcher may return zero after failing SteamAPI_Init. Do not cache this as success.
+        return elapsed < 15 ? .unconfirmed : .completed
     }
 }
 

@@ -9,6 +9,8 @@ struct LayaGameProfile: Codable, Hashable {
         case dxmtMSyncForceD3D11 = "dxmt_msync_force_d3d11"
         case vkd3dStandard = "vkd3d_standard"
         case vkd3dMSync = "vkd3d_msync"
+        case wineD3DStandard = "wined3d_standard"
+        case wineD3DMSync = "wined3d_msync"
     }
 
     var appID: String
@@ -19,7 +21,7 @@ struct LayaGameProfile: Codable, Hashable {
     var createdAt: Date
 
     var msync: Bool {
-        kind == .dxmtMSync || kind == .dxmtMSyncForceD3D11 || kind == .vkd3dMSync
+        kind == .dxmtMSync || kind == .dxmtMSyncForceD3D11 || kind == .vkd3dMSync || kind == .wineD3DMSync
     }
 
     var usesD3D12: Bool {
@@ -43,6 +45,8 @@ struct LayaGameProfile: Codable, Hashable {
         case .dxmtMSyncForceD3D11: return "DXMT · MSync · D3D11"
         case .vkd3dStandard: return "D3D12 · VKD3D"
         case .vkd3dMSync: return "D3D12 · VKD3D · MSync"
+        case .wineD3DStandard: return "WineD3D"
+        case .wineD3DMSync: return "WineD3D · MSync"
         }
     }
 }

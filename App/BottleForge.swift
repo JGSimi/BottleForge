@@ -2,19 +2,6 @@ import SwiftUI
 import AppKit
 import Foundation
 
-enum Renderer: String, CaseIterable, Codable, Identifiable {
-    case dxmt = "DXMT"
-    case wineD3D = "WineD3D"
-
-    var id: String { rawValue }
-    var detail: String {
-        switch self {
-        case .dxmt: return "Direct3D 10/11 → Metal"
-        case .wineD3D: return "Compatibilidade padrão do Wine"
-        }
-    }
-}
-
 struct Bottle: Codable, Identifiable, Hashable {
     var id: UUID
     var name: String
@@ -30,6 +17,8 @@ struct InstalledApp: Identifiable, Hashable {
     var icon: String
     var executable: URL
     var arguments: [String]
+    var gameExecutable: URL? = nil
+    var gameDirectory: URL? = nil
 }
 
 private enum InstalledAppScanner {
@@ -61,7 +50,7 @@ private enum InstalledAppScanner {
                 executable: steam,
                 arguments: []
             ))
-            scanSteamGames(steam: steam, add: add)
+            scanSteamGames(steam: steam, prefix: prefix, add: add)
         }
 
         scanProgramFiles(driveC: driveC, excludingSteam: seen.contains("steam"), add: add)
@@ -75,39 +64,45 @@ private enum InstalledAppScanner {
         }
     }
 
-    private static func scanSteamGames(steam: URL, add: (InstalledApp) -> Void) {
+    private static func scanSteamGames(steam: URL, prefix: URL, add: (InstalledApp) -> Void) {
         let fm = FileManager.default
-        let steamRoot = steam.deletingLastPathComponent()
-        let steamApps = steamRoot.appendingPathComponent("steamapps")
-        guard let manifests = try? fm.contentsOfDirectory(
-            at: steamApps,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ) else { return }
+        for library in SteamLibraries.roots(steam: steam, prefix: prefix) {
+            let steamApps = library.appendingPathComponent("steamapps")
+            guard let manifests = try? fm.contentsOfDirectory(
+                at: steamApps,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) else { continue }
 
-        for manifest in manifests where manifest.lastPathComponent.hasPrefix("appmanifest_") && manifest.pathExtension == "acf" {
-            guard
-                let text = try? String(contentsOf: manifest, encoding: .utf8),
-                let appID = acfValue("appid", in: text),
-                let name = acfValue("name", in: text),
-                let installDir = acfValue("installdir", in: text)
-            else { continue }
+            for manifest in manifests where manifest.lastPathComponent.hasPrefix("appmanifest_") && manifest.pathExtension == "acf" {
+                guard
+                    let text = try? String(contentsOf: manifest, encoding: .utf8),
+                    let appID = acfValue("appid", in: text),
+                    let name = acfValue("name", in: text),
+                    let installDir = acfValue("installdir", in: text)
+                else { continue }
 
-            let gameDir = steamApps.appendingPathComponent("common").appendingPathComponent(installDir)
-            guard fm.fileExists(atPath: gameDir.path) else { continue }
+                guard !appID.isEmpty, appID.allSatisfy(\.isNumber),
+                      !installDir.isEmpty, !installDir.contains("/"), !installDir.contains("\\"),
+                      installDir != ".", installDir != ".." else { continue }
 
-            let detail = appID == "1245620"
-                ? "Steam · Jogo · Offline · D3D12 (EAC)"
-                : "Steam · Jogo"
+                let gameDir = steamApps.appendingPathComponent("common").appendingPathComponent(installDir)
+                guard fm.fileExists(atPath: gameDir.path) else { continue }
 
-            add(InstalledApp(
-                id: "steam:\(appID)",
-                name: name,
-                detail: detail,
-                icon: "play.rectangle.fill",
-                executable: steam,
-                arguments: ["-applaunch", appID]
-            ))
+                let detail = appID == "1245620"
+                    ? "Steam · Jogo · Offline · D3D12 (EAC)"
+                    : "Steam · Jogo"
+
+                add(InstalledApp(
+                    id: "steam:\(appID)",
+                    name: name,
+                    detail: detail,
+                    icon: "play.rectangle.fill",
+                    executable: steam,
+                    arguments: ["-applaunch", appID],
+                    gameDirectory: gameDir
+                ))
+            }
         }
     }
 
@@ -164,7 +159,7 @@ private enum InstalledAppScanner {
         }
     }
 
-    private static func bestExecutable(in folder: URL, appName: String) -> URL? {
+    static func bestExecutable(in folder: URL, appName: String) -> URL? {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(
             at: folder,
@@ -409,316 +404,251 @@ final class BottleStore: ObservableObject {
             self.status = code == 0 ? "\(trimmed) criado" : "Wineboot falhou (\(code))"
         }
     }
+    private var history: CompatibilityHistory {
+        CompatibilityHistory(root: supportRoot.appendingPathComponent("Compatibility"))
+    }
+    private var gameMonitors: [UUID: GameMonitorToken] = [:]
+    private var sessionProfiles: [UUID: LayaGameProfile.Kind] = [:]
+
     func runExecutable(_ url: URL, in bottle: Bottle) {
-        launch(url, arguments: [], displayName: url.lastPathComponent, in: bottle)
+        if isSteamExecutable(url) {
+            launch(url, arguments: [], displayName: url.lastPathComponent, in: bottle)
+        } else {
+            launchGame(url, arguments: [], displayName: url.lastPathComponent,
+                       gameExecutable: url, in: bottle)
+        }
     }
 
     func installedApps(in bottle: Bottle) -> [InstalledApp] {
         InstalledAppScanner.scan(prefix: prefixURL(bottle))
     }
 
+    func resetCompatibility(in bottle: Bottle) {
+        guard gameMonitors[bottle.id] == nil else {
+            status = "Encerre o jogo antes de redefinir os perfis"
+            return
+        }
+        try? fm.removeItem(at: history.root.appendingPathComponent(bottle.id.uuidString))
+        status = "Perfis de compatibilidade redefinidos"
+    }
+
     func runInstalledApp(_ app: InstalledApp, in bottle: Bottle) {
         guard ensureRosettaAvailable() else { return }
-
-        guard app.id.hasPrefix("steam:") else {
+        if app.id == "steam" {
             launch(app.executable, arguments: app.arguments, displayName: app.name, in: bottle)
-            return
-        }
-
-        let appID = String(app.id.dropFirst("steam:".count))
-
-        if appID == "1245620" {
+        } else if app.id == "steam:1245620" {
             launchEldenRingOffline(app, bottle: bottle)
-            return
+        } else {
+            let appID = app.id.hasPrefix("steam:") ? String(app.id.dropFirst(6)) : nil
+            launchGame(app.executable, arguments: app.arguments, displayName: app.name,
+                       gameExecutable: app.gameExecutable ?? (appID == nil ? app.executable : nil),
+                       gameDirectory: app.gameDirectory, steamAppID: appID, in: bottle)
         }
-
-        monitorSteamGame(appID: appID, name: app.name, bottle: bottle)
-
-        guard bottle.renderer == .dxmt else {
-            launch(app.executable, arguments: app.arguments, displayName: app.name, in: bottle)
-            return
-        }
-
-        optimizeAndLaunchSteamGame(app, appID: appID, bottle: bottle)
     }
 
     private func launchEldenRingOffline(_ app: InstalledApp, bottle: Bottle) {
-        let appID = "1245620"
-        let steamRoot = app.executable.deletingLastPathComponent()
-        let gameDir = steamRoot
-            .appendingPathComponent("steamapps/common/ELDEN RING/Game")
+        let gameDir = (app.gameDirectory ?? app.executable.deletingLastPathComponent()
+            .appendingPathComponent("steamapps/common/ELDEN RING"))
+            .appendingPathComponent("Game")
         let game = gameDir.appendingPathComponent("eldenring.exe")
-
         guard fm.fileExists(atPath: game.path) else {
-            status = "Elden Ring não encontrado na biblioteca padrão da Steam"
+            status = "Executável do Elden Ring não encontrado"
             return
         }
-
-        guard prepareD3D12Runtime(in: bottle) else {
-            status = "Runtime DirectX 12 não encontrado no BottleForge"
-            return
-        }
-
         do {
-            try "1245620\n".write(
-                to: gameDir.appendingPathComponent("steam_appid.txt"),
-                atomically: true,
-                encoding: .utf8
-            )
+            try "1245620\n".write(to: gameDir.appendingPathComponent("steam_appid.txt"),
+                                   atomically: true, encoding: .utf8)
         } catch {
             status = "Não foi possível preparar o modo offline do Elden Ring"
             return
         }
+        launchGame(game, arguments: [], displayName: app.name + " · Offline",
+                   gameExecutable: game, steamAppID: "1245620", offline: true, in: bottle)
+    }
 
-        let launchWithProfile: (LayaGameProfile?) -> Void = { [weak self] profile in
-            guard let self else { return }
-            guard let wine = self.wineURL(for: .dxmt) else {
-                self.status = "Engine Wine não encontrada"
-                return
-            }
-
-            let shaderCache = self.supportRoot.appendingPathComponent("ShaderCache/\(appID)")
-            try? self.fm.createDirectory(at: shaderCache, withIntermediateDirectories: true)
-
-            var overrides: [String: String] = [
-                "SteamAppId": appID,
-                "SteamGameId": appID,
-                "WINEDLLOVERRIDES": "d3d12,d3d12core,dxgi=n,b",
-                "VK_ICD_FILENAMES": self.d3d12RuntimeRoot.appendingPathComponent("MoltenVK_icd.json").path,
-                "DYLD_LIBRARY_PATH": self.d3d12RuntimeRoot.path,
-                "DYLD_FALLBACK_LIBRARY_PATH": self.d3d12RuntimeRoot.path,
-                "MVK_PRESENT_MODE": "1",
-                "VKMT_ALLOW_NON_SINGLE_TEXEL_ALIGNMENT": "1",
-                "VKD3D_SHADER_CACHE_PATH": shaderCache.path,
-                "WINE_DO_NOT_CREATE_DXGI_DEVICE_MANAGER": "0"
-            ]
-            if let profile {
-                overrides["WINEMSYNC"] = profile.msync ? "1" : "0"
-            }
-
-            self.status = profile == nil
-                ? "Abrindo Elden Ring · Offline · D3D12"
-                : "Abrindo Elden Ring · Offline · \(profile!.displayName)"
-
-            self.runProcess(
-                wine,
-                args: [game.path],
-                bottle: bottle,
-                environmentOverrides: overrides,
-                workingDirectory: gameDir
-            ) { code in
-                if code == 0 {
-                    self.status = "Elden Ring finalizado · Offline"
-                } else {
-                    LayaProfileEngine.invalidate(appID: appID, supportRoot: self.supportRoot)
-                    self.status = "Elden Ring saiu com código \(code) · perfil D3D12 será recalculado"
-                }
-            }
+    private func launchGame(
+        _ executable: URL, arguments: [String], displayName: String,
+        gameExecutable: URL?, gameDirectory: URL? = nil,
+        steamAppID: String? = nil, offline: Bool = false, in bottle: Bottle
+    ) {
+        guard ensureRosettaAvailable(), !busy else { return }
+        guard gameMonitors[bottle.id] == nil else {
+            status = "Já existe um jogo em execução nesta bottle"
+            return
         }
-
-        if let profile = LayaProfileEngine.cachedProfile(appID: appID, supportRoot: supportRoot) {
-            if profile.usesD3D12 {
-                launchWithProfile(profile)
-                return
-            }
-            LayaProfileEngine.invalidate(appID: appID, supportRoot: supportRoot)
-        }
-
-        let firstRun = !LayaProfileEngine.modelIsCached(supportRoot: supportRoot)
-        status = firstRun
-            ? "Preparando Elden Ring D3D12 + otimização automática…"
-            : "Otimizando Elden Ring D3D12 com Laya…"
         busy = true
-
-        let supportRoot = supportRoot
-        let projectRoot = projectRoot
+        status = "Detectando compatibilidade de \(displayName)…"
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            do {
-                let profile = try LayaProfileEngine.chooseProfile(
-                    appID: appID,
-                    gameName: app.name + " (offline, sem EAC)",
-                    renderer: .dxmt,
-                    supportRoot: supportRoot,
-                    projectRoot: projectRoot,
-                    graphicsAPI: "D3D12"
-                )
-
-                DispatchQueue.main.async {
-                    self?.busy = false
-                    launchWithProfile(profile)
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self?.busy = false
-                    self?.status = "Laya indisponível; abrindo Elden Ring D3D12 com perfil padrão"
-                    launchWithProfile(nil)
-                }
+            let target = gameExecutable ?? gameDirectory.flatMap {
+                InstalledAppScanner.bestExecutable(in: $0, appName: displayName)
+            }
+            let evidence = target.map { PEGameInspector.inspect(executable: $0) } ?? GameEvidence()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.busy = false
+                guard self.bottles.contains(where: { $0.id == bottle.id }) else { return }
+                self.launchDetectedGame(executable, arguments: arguments, displayName: displayName,
+                                        evidence: evidence, steamAppID: steamAppID, offline: offline, in: bottle)
             }
         }
     }
 
-    private func prepareD3D12Runtime(in bottle: Bottle) -> Bool {
-        let required = ["dxgi.dll", "d3d12.dll", "d3d12core.dll", "libMoltenVK.dylib", "MoltenVK_icd.json"]
-        guard required.allSatisfy({ fm.fileExists(atPath: d3d12RuntimeRoot.appendingPathComponent($0).path) }) else {
-            return false
+    private func launchDetectedGame(
+        _ executable: URL, arguments: [String], displayName: String, evidence: GameEvidence,
+        steamAppID: String?, offline: Bool, in bottle: Bottle
+    ) {
+        var candidates = GameCompatibility.candidates(evidence: evidence, renderer: bottle.renderer,
+                                                      msync: bottle.msync, d3d12Available: d3d12RuntimeAvailable)
+        candidates.removeAll { wineURL(for: $0.renderer) == nil }
+        guard !candidates.isEmpty else {
+            status = evidence.machine == .arm64
+                ? "Executável Windows ARM64 incompatível com esta engine x86_64"
+                : "Nenhum runtime compatível disponível para as APIs detectadas (\(evidence.apis.map(\.rawValue).sorted().joined(separator: ", ")))"
+            return
         }
+        // Old AI suggestions may rank supported profiles, but cannot invent an API or retry a failed profile.
+        if let appID = steamAppID,
+           let cached = LayaProfileEngine.cachedProfile(appID: appID, supportRoot: supportRoot),
+           let index = candidates.firstIndex(of: cached.kind) {
+            candidates.remove(at: index); candidates.insert(cached.kind, at: 0)
+        }
+        let gameKey = steamAppID.map { "steam:" + $0 + (offline ? ":offline" : "") } ?? "exe:" + executable.standardizedFileURL.path
+        let key = bottle.id.uuidString + "/" + gameKey
+        let fingerprint = compatibilityFingerprint(evidence: evidence, bottle: bottle)
+        guard let kind = history.next(key: key, fingerprint: fingerprint, candidates: candidates) else {
+            status = "Perfis disponíveis esgotados para \(displayName). Consulte os logs ou redefina os perfis nesta bottle."
+            return
+        }
+        var effectiveBottle = bottle
+        effectiveBottle.renderer = kind.renderer
+        let running = wineSessionIsRunning(in: bottle)
+        if running && sessionProfiles[bottle.id] != kind {
+            status = "Encerre os processos Wine desta bottle antes de aplicar o novo perfil de \(displayName)"
+            return
+        }
+        if !running { sessionProfiles[bottle.id] = nil }
+        let profile = LayaGameProfile(appID: steamAppID ?? gameKey, gameName: displayName, kind: kind,
+                                      probabilities: [:], confidence: nil, createdAt: Date())
+        if profile.usesD3D12 && !running && !prepareD3D12Runtime(in: effectiveBottle) {
+            status = "Não foi possível preparar o runtime DirectX 12"
+            return
+        }
+        let token = GameMonitorToken()
+        gameMonitors[bottle.id] = token
+        sessionProfiles[bottle.id] = kind
+        let attempt = CompatibilityAttempt(key: key, fingerprint: fingerprint, profile: profile)
+        launch(executable, arguments: arguments, displayName: displayName, in: effectiveBottle,
+               profile: profile, attempt: attempt, monitorToken: token,
+               steamAppID: steamAppID, offline: offline)
+    }
 
-        let system32 = prefixURL(bottle).appendingPathComponent("drive_c/windows/system32")
+    private var d3d12RuntimeAvailable: Bool {
+        ["dxgi.dll", "d3d12.dll", "d3d12core.dll", "libMoltenVK.dylib", "MoltenVK_icd.json"]
+            .allSatisfy { fm.fileExists(atPath: d3d12RuntimeRoot.appendingPathComponent($0).path) }
+    }
+
+    private func compatibilityFingerprint(evidence: GameEvidence, bottle: Bottle) -> String {
+        let runtimes = [wineURL(for: .dxmt), wineURL(for: .wineD3D),
+                        dxmtEngineRoot.appendingPathComponent("Contents/Resources/wine/lib/wine/x86_64-windows/d3d11.dll"),
+                        d3d12RuntimeRoot.appendingPathComponent("d3d12.dll"),
+                        d3d12RuntimeRoot.appendingPathComponent("libMoltenVK.dylib")]
+        let stamps = runtimes.compactMap { $0 }.map { url -> String in
+            let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            return "\(url.path):\(values?.fileSize ?? 0):\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
+        }
+        let release = Bundle.main.object(forInfoDictionaryKey: "BottleForgeReleaseTag") as? String ?? "development"
+        return (["policy-1", release, bottle.renderer.rawValue, String(bottle.msync), evidence.fingerprint] + stamps).joined(separator: "|")
+    }
+
+    // `wineserver -w` only waits for the prefix server; cancelling this probe does not kill games.
+    private func wineSessionIsRunning(in bottle: Bottle) -> Bool {
+        guard let server = wineserverURL(for: bottle.renderer) else { return false }
+        let probe = Process()
+        probe.executableURL = server
+        probe.arguments = ["-w"]
+        probe.environment = environment(for: bottle)
+        probe.standardOutput = FileHandle.nullDevice
+        probe.standardError = FileHandle.nullDevice
         do {
-            try fm.createDirectory(at: system32, withIntermediateDirectories: true)
-            for name in ["dxgi.dll", "d3d12.dll", "d3d12core.dll"] {
-                let source = d3d12RuntimeRoot.appendingPathComponent(name)
-                let target = system32.appendingPathComponent(name)
-                try? fm.removeItem(at: target)
-                try fm.copyItem(at: source, to: target)
-            }
+            try probe.run()
+            Thread.sleep(forTimeInterval: 0.2)
+            if probe.isRunning { probe.terminate(); return true }
+            return probe.terminationStatus != 0
+        } catch { return true }
+    }
+
+    private func prepareD3D12Runtime(in bottle: Bottle) -> Bool {
+        guard d3d12RuntimeAvailable else { return false }
+        do {
+            try D3D12RuntimeInstaller.install(runtime: d3d12RuntimeRoot, prefix: prefixURL(bottle))
             return true
         } catch {
             return false
         }
     }
 
-    private func optimizeAndLaunchSteamGame(_ app: InstalledApp, appID: String, bottle: Bottle) {
-        if let profile = LayaProfileEngine.cachedProfile(appID: appID, supportRoot: supportRoot) {
-            status = "Abrindo \(app.name) · Auto: \(profile.displayName)"
-            launch(
-                app.executable,
-                arguments: app.arguments,
-                displayName: app.name,
-                in: bottle,
-                profile: profile
-            )
-            return
-        }
-
-        let firstRun = !LayaProfileEngine.modelIsCached(supportRoot: supportRoot)
-        status = firstRun
-            ? "Preparando otimização automática (~1,7 GB na primeira vez)…"
-            : "Otimizando \(app.name) com Laya…"
-        busy = true
-
-        let supportRoot = supportRoot
-        let projectRoot = projectRoot
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            do {
-                let profile = try LayaProfileEngine.chooseProfile(
-                    appID: appID,
-                    gameName: app.name,
-                    renderer: bottle.renderer,
-                    supportRoot: supportRoot,
-                    projectRoot: projectRoot
-                )
-
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    self.busy = false
-                    self.status = "Laya escolheu \(profile.displayName) · abrindo \(app.name)…"
-                    self.launch(
-                        app.executable,
-                        arguments: app.arguments,
-                        displayName: app.name,
-                        in: bottle,
-                        profile: profile
-                    )
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    self.busy = false
-                    self.status = "Laya indisponível; usando perfil padrão"
-                    self.launch(app.executable, arguments: app.arguments, displayName: app.name, in: bottle)
-                }
-            }
-        }
-    }
-
-    private func monitorSteamGame(appID: String, name: String, bottle: Bottle) {
-        let steamRoots = [
-            prefixURL(bottle).appendingPathComponent("drive_c/Program Files (x86)/Steam"),
-            prefixURL(bottle).appendingPathComponent("drive_c/Program Files/Steam")
-        ]
-        guard let steamRoot = steamRoots.first(where: { fm.fileExists(atPath: $0.path) }) else { return }
-
-        let processLog = steamRoot.appendingPathComponent("logs/gameprocess_log.txt")
-        let baselineSize = (try? Data(contentsOf: processLog).count) ?? 0
+    private func monitorSteamGame(
+        appID: String, name: String, bottle: Bottle, processLog: URL,
+        baselineSize: Int, attempt: CompatibilityAttempt, token: GameMonitorToken
+    ) {
         let diagnosticsRoot = logsRoot
-        let profileSupportRoot = supportRoot
-        let bottleName = bottle.name
-
+        let history = history
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let launchDeadline = Date().addingTimeInterval(180)
             let monitorDeadline = Date().addingTimeInterval(6 * 60 * 60)
-            var mainPID: String?
-            var latestChunk = ""
-
-            while Date() < monitorDeadline {
+            var session = SteamGameSession(appID: appID)
+            var offset = baselineSize
+            var remainder = ""
+            var diagnostic = ""
+            var pendingExit: (code: Int, since: Date)?
+            while Date() < monitorDeadline && !token.isCancelled {
                 Thread.sleep(forTimeInterval: 2)
-
-                guard let data = try? Data(contentsOf: processLog) else { continue }
-                let offset = data.count >= baselineSize ? baselineSize : 0
-                latestChunk = String(data: data.suffix(from: offset), encoding: .utf8) ?? ""
-
-                let lines = latestChunk.components(separatedBy: .newlines)
-                let addMarker = "AppID \(appID) adding PID "
-
-                if mainPID == nil {
-                    for line in lines where line.contains(addMarker) {
-                        let lower = line.lowercased()
-                        if lower.contains("crashhandler") || lower.contains("steamerrorreporter") {
-                            continue
-                        }
-
-                        if let range = line.range(of: addMarker) {
-                            let tail = line[range.upperBound...]
-                            mainPID = tail.split(separator: " ").first.map(String.init)
-                            break
-                        }
+                if token.isCancelled { return }
+                if let handle = try? FileHandle(forReadingFrom: processLog) {
+                    let size = (try? handle.seekToEnd()) ?? UInt64(offset)
+                    if size < UInt64(offset) { offset = 0; remainder = "" }
+                    try? handle.seek(toOffset: UInt64(offset))
+                    // Read incrementally, never repeatedly load an entire six-hour process log.
+                    let data = (try? handle.read(upToCount: 256 * 1024)) ?? Data()
+                    try? handle.close()
+                    offset += data.count
+                    remainder += String(decoding: data, as: UTF8.self)
+                    if let boundary = remainder.lastIndex(of: "\n") {
+                        let chunk = String(remainder[...boundary])
+                        remainder = String(remainder[remainder.index(after: boundary)...])
+                        diagnostic = String((diagnostic + chunk).suffix(64 * 1024))
+                        if let code = session.consume(chunk) {
+                            if pendingExit == nil { pendingExit = (code, Date()) }
+                            else { pendingExit?.code = code }
+                        } else { pendingExit = nil }
                     }
+                    remainder = String(remainder.suffix(64 * 1024))
                 }
-
-                if let mainPID {
-                    let exitMarker = "AppID \(appID) no longer tracking PID \(mainPID), exit code "
-                    if let exitLine = lines.last(where: { $0.contains(exitMarker) }),
-                       let range = exitLine.range(of: exitMarker) {
-                        let rawCode = exitLine[range.upperBound...]
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        let code = Int(rawCode) ?? -1
-
-                        if code == 0 {
-                            DispatchQueue.main.async {
-                                self?.status = "\(name) finalizado"
-                            }
-                        } else {
-                            LayaProfileEngine.invalidate(appID: appID, supportRoot: profileSupportRoot)
-                            _ = Self.writeSteamDiagnostic(
-                                appID: appID,
-                                name: name,
-                                bottleName: bottleName,
-                                exitCode: code,
-                                details: latestChunk,
-                                directory: diagnosticsRoot
-                            )
-                            DispatchQueue.main.async {
-                                self?.status = "\(name) encerrou com código \(code) · perfil Auto será recalculado"
-                            }
-                        }
-                        return
-                    }
-                } else if Date() > launchDeadline {
-                    LayaProfileEngine.invalidate(appID: appID, supportRoot: profileSupportRoot)
-                    _ = Self.writeSteamDiagnostic(
-                        appID: appID,
-                        name: name,
-                        bottleName: bottleName,
-                        exitCode: nil,
-                        details: latestChunk,
-                        directory: diagnosticsRoot
-                    )
+                if let exit = pendingExit, Date().timeIntervalSince(exit.since) >= 4 {
+                    guard !token.isCancelled else { return }
+                    history.record(key: attempt.key, fingerprint: attempt.fingerprint,
+                                   profile: attempt.profile.kind, succeeded: exit.code == 0)
+                    _ = Self.writeSteamDiagnostic(appID: appID, name: name, bottleName: bottle.name,
+                                                 exitCode: exit.code, details: "Profile: \(attempt.profile.displayName)\n" + diagnostic,
+                                                 directory: diagnosticsRoot)
                     DispatchQueue.main.async {
-                        self?.status = "\(name) não iniciou · perfil Auto será recalculado"
+                        guard !token.isCancelled else { return }
+                        self?.gameMonitors[bottle.id] = nil
+                        self?.status = exit.code == 0 ? "\(name) finalizado"
+                            : "\(name) saiu com código \(exit.code) · outro perfil será tentado na próxima abertura"
                     }
                     return
                 }
+                if !session.started && Date() > launchDeadline { break }
+            }
+            guard !token.isCancelled else { return }
+            // Missing Steam telemetry is inconclusive, not proof that a renderer failed.
+            _ = Self.writeSteamDiagnostic(appID: appID, name: name, bottleName: bottle.name,
+                                         exitCode: nil, details: diagnostic, directory: diagnosticsRoot)
+            DispatchQueue.main.async {
+                guard !token.isCancelled else { return }
+                self?.gameMonitors[bottle.id] = nil
+                self?.status = "Sem confirmação de execução de \(name) · consulte os logs"
             }
         }
     }
@@ -755,98 +685,122 @@ final class BottleStore: ObservableObject {
     }
 
     private func launch(
-        _ executable: URL,
-        arguments: [String],
-        displayName: String,
-        in bottle: Bottle,
-        profile: LayaGameProfile? = nil
+        _ executable: URL, arguments: [String], displayName: String, in bottle: Bottle,
+        profile: LayaGameProfile? = nil, attempt: CompatibilityAttempt? = nil,
+        monitorToken: GameMonitorToken? = nil, steamAppID: String? = nil, offline: Bool = false
     ) {
-        guard ensureRosettaAvailable() else { return }
-
-        guard let wine = wineURL(for: bottle.renderer) else {
-            status = "Engine Wine não encontrada"
+        guard ensureRosettaAvailable(), let wine = wineURL(for: bottle.renderer) else {
+            gameMonitors[bottle.id] = nil
+            status = "Engine Wine ou Rosetta não encontrada"
             return
         }
-
         if isSteamExecutable(executable) {
-            launchSteam(
-                executable,
-                arguments: arguments,
-                displayName: displayName,
-                wine: wine,
-                bottle: bottle,
-                profile: profile
-            )
+            launchSteam(executable, arguments: arguments, displayName: displayName, wine: wine,
+                        bottle: bottle, profile: profile, attempt: attempt, monitorToken: monitorToken)
             return
         }
-
-        status = "Abrindo \(displayName)…"
-        runProcess(wine, args: [executable.path] + arguments, bottle: bottle) { code in
-            self.status = code == 0 ? "\(displayName) finalizado" : "\(displayName) saiu com código \(code)"
+        var overrides = profileEnvironment(profile)
+        if offline, let appID = steamAppID {
+            overrides["SteamAppId"] = appID
+            overrides["SteamGameId"] = appID
         }
+        let log = processDiagnosticURL(in: bottle)
+        status = "Abrindo \(displayName) · \(profile?.displayName ?? bottle.renderer.rawValue)…"
+        runProcess(wine, args: [executable.path] + arguments + (profile?.launchArguments ?? []), bottle: bottle,
+                   environmentOverrides: overrides, workingDirectory: executable.deletingLastPathComponent(), logURL: log) { code in
+            guard monitorToken?.isCancelled != true else { return }
+            self.gameMonitors[bottle.id] = nil
+            if let attempt {
+                self.history.record(key: attempt.key, fingerprint: attempt.fingerprint,
+                                    profile: attempt.profile.kind, succeeded: code == 0)
+            }
+            self.status = code == 0 ? "\(displayName) finalizado"
+                : "\(displayName) saiu com código \(code) · consulte \(log.lastPathComponent); outro perfil na próxima abertura"
+        }
+    }
+
+    private func profileEnvironment(_ profile: LayaGameProfile?) -> [String: String] {
+        guard let profile else { return [:] }
+        var overrides = ["WINEMSYNC": profile.msync ? "1" : "0"]
+        if profile.usesD3D12 {
+            let key = profile.appID.filter { $0.isNumber }
+            let shaderCache = supportRoot.appendingPathComponent("ShaderCache/" + (key.isEmpty ? "local" : key))
+            try? fm.createDirectory(at: shaderCache, withIntermediateDirectories: true)
+            overrides.merge([
+                "WINEDLLOVERRIDES": "d3d12,d3d12core,dxgi=n,b;d3d11,d3d10core,winemetal=builtin",
+                "VK_ICD_FILENAMES": d3d12RuntimeRoot.appendingPathComponent("MoltenVK_icd.json").path,
+                "DYLD_LIBRARY_PATH": d3d12RuntimeRoot.path,
+                "DYLD_FALLBACK_LIBRARY_PATH": d3d12RuntimeRoot.path,
+                "MVK_PRESENT_MODE": "1",
+                "VKMT_ALLOW_NON_SINGLE_TEXEL_ALIGNMENT": "1",
+                "VKD3D_SHADER_CACHE_PATH": shaderCache.path,
+                "WINE_DO_NOT_CREATE_DXGI_DEVICE_MANAGER": "0"
+            ], uniquingKeysWith: { _, new in new })
+        }
+        return overrides
+    }
+
+    private func processDiagnosticURL(in bottle: Bottle) -> URL {
+        logsRoot.appendingPathComponent("wine-\(bottle.id.uuidString)-\(UUID().uuidString).log")
     }
 
     private func isSteamExecutable(_ executable: URL) -> Bool {
         executable.lastPathComponent.caseInsensitiveCompare("Steam.exe") == .orderedSame
-            && executable.path.lowercased().contains("/steam/")
     }
 
     private func launchSteam(
-        _ executable: URL,
-        arguments: [String],
-        displayName: String,
-        wine: URL,
-        bottle: Bottle,
-        profile: LayaGameProfile?
+        _ executable: URL, arguments: [String], displayName: String, wine: URL,
+        bottle: Bottle, profile: LayaGameProfile?, attempt: CompatibilityAttempt?, monitorToken: GameMonitorToken?
     ) {
-        if !arguments.contains("-applaunch") {
-            terminateRunningSteam(in: bottle)
+        let isGame = arguments.contains("-applaunch")
+        if !isGame {
+            guard gameMonitors[bottle.id] == nil else {
+                status = "Encerre o jogo antes de reiniciar a Steam"
+                return
+            }
+            // Never kill every process in the prefix just to bring Steam to the foreground.
+            let expected: LayaGameProfile.Kind = bottle.renderer == .dxmt
+                ? (bottle.msync ? .dxmtMSync : .dxmtStandard)
+                : (bottle.msync ? .wineD3DMSync : .wineD3DStandard)
+            if wineSessionIsRunning(in: bottle) {
+                if let current = sessionProfiles[bottle.id], current.renderer != bottle.renderer {
+                    status = "Encerre os processos Wine antes de abrir a Steam com outro renderer"
+                    return
+                }
+            } else {
+                sessionProfiles[bottle.id] = expected
+            }
         }
-
         guard prepareSteamCEFCompatibility(in: bottle) else {
+            gameMonitors[bottle.id] = nil
             status = "Não foi possível preparar a interface da Steam"
             return
         }
-
-        let steamArgs = [
-            "-no-cef-sandbox",
-            "-noverifyfiles"
-        ] + (profile?.launchArguments ?? []) + arguments
-
-        var environmentOverrides: [String: String] = [:]
-        if let profile {
-            environmentOverrides["WINEMSYNC"] = profile.msync ? "1" : "0"
+        let processLog = executable.deletingLastPathComponent().appendingPathComponent("logs/gameprocess_log.txt")
+        let baseline = (try? processLog.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        let log = processDiagnosticURL(in: bottle)
+        status = "Abrindo \(displayName) · \(profile?.displayName ?? bottle.renderer.rawValue)…"
+        runProcess(wine, args: [executable.path] + GameCompatibility.steamArguments(arguments, profile: profile?.kind),
+                   bottle: bottle, environmentOverrides: profileEnvironment(profile),
+                   workingDirectory: executable.deletingLastPathComponent(), logURL: log,
+                   didStart: {
+            if let attempt, let token = monitorToken, let index = arguments.firstIndex(of: "-applaunch"), index + 1 < arguments.count {
+                self.monitorSteamGame(appID: arguments[index + 1], name: displayName, bottle: bottle,
+                                      processLog: processLog, baselineSize: baseline, attempt: attempt, token: token)
+            }
+        }) { code in
+            if isGame {
+                // Steam's exit status is not the child game's exit status.
+                if code != 0 && monitorToken?.isCancelled != true {
+                    monitorToken?.cancel()
+                    self.gameMonitors[bottle.id] = nil
+                    self.status = "Steam saiu com código \(code) · consulte \(log.lastPathComponent)"
+                }
+            } else {
+                self.status = code == 0 ? "Steam finalizado" : "Steam saiu com código \(code)"
+            }
         }
-
-        status = "Abrindo \(displayName)…"
-        runProcess(
-            wine,
-            args: [executable.path] + steamArgs,
-            bottle: bottle,
-            environmentOverrides: environmentOverrides
-        ) { code in
-            self.status = code == 0 ? "\(displayName) finalizado" : "\(displayName) saiu com código \(code)"
-        }
-
         scheduleSteamBootstrapGuardRemoval(in: bottle)
-    }
-
-    private func terminateRunningSteam(in bottle: Bottle) {
-        guard let server = wineserverURL(for: bottle.renderer) else { return }
-
-        let process = Process()
-        process.executableURL = server
-        process.arguments = ["-k"]
-        process.environment = environment(for: bottle)
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            // Continue: Steam may not have been running.
-        }
     }
 
     private func prepareSteamCEFCompatibility(in bottle: Bottle) -> Bool {
@@ -1006,6 +960,8 @@ final class BottleStore: ObservableObject {
     }
 
     func kill(_ bottle: Bottle) {
+        gameMonitors.removeValue(forKey: bottle.id)?.cancel()
+        sessionProfiles[bottle.id] = nil
         guard let server = wineserverURL(for: bottle.renderer) else { status = "wineserver não encontrado"; return }
         runProcess(server, args: ["-k"], bottle: bottle) { _ in
             self.status = "Processos encerrados"
@@ -1018,12 +974,14 @@ final class BottleStore: ObservableObject {
     }
 
     func delete(_ bottle: Bottle) {
+        gameMonitors.removeValue(forKey: bottle.id)?.cancel()
+        sessionProfiles[bottle.id] = nil
         try? fm.removeItem(at: bottleDirectory(bottle))
         bottles.removeAll { $0.id == bottle.id }
         status = "\(bottle.name) removido"
     }
     var engineDescription: String {
-        "Wine 11.8 Staging · DXMT 0.80 · D3D12 · Auto Laya"
+        "Wine 11.8 Staging · DXMT 0.80 · D3D12 · Auto por API"
     }
 
     private func wineURL(for renderer: Renderer) -> URL? {
@@ -1081,7 +1039,7 @@ final class BottleStore: ObservableObject {
     private func environment(for bottle: Bottle) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         env["WINEPREFIX"] = prefixURL(bottle).path
-        env["WINEDEBUG"] = "-all"
+        env["WINEDEBUG"] = "-all,+seh,+timestamp"
         env["WINEESYNC"] = "0"
         env["WINEMSYNC"] = bottle.msync ? "1" : "0"
         env["MVK_CONFIG_RESUME_LOST_DEVICE"] = "1"
@@ -1090,10 +1048,10 @@ final class BottleStore: ObservableObject {
         env["PATH"] = engineBin + ":" + (env["PATH"] ?? "")
 
         if bottle.renderer == .dxmt {
-            env["WINEDLLOVERRIDES"] = "dxgi,d3d11,d3d10core,winemetal=builtin"
+            env["WINEDLLOVERRIDES"] = "dxgi,d3d11,d3d10core,winemetal=builtin;d3d12,d3d12core="
             env["WINE_DO_NOT_CREATE_DXGI_DEVICE_MANAGER"] = "1"
         } else {
-            env["WINEDLLOVERRIDES"] = ""
+            env["WINEDLLOVERRIDES"] = "dxgi,d3d11,d3d10core,d3d9=builtin;d3d12,d3d12core="
         }
 
         let bundledFrameworks = Bundle.main.resourceURL?.appendingPathComponent("Frameworks")
@@ -1112,6 +1070,8 @@ final class BottleStore: ObservableObject {
         bottle: Bottle,
         environmentOverrides: [String: String] = [:],
         workingDirectory: URL? = nil,
+        logURL: URL? = nil,
+        didStart: (() -> Void)? = nil,
         completion: @escaping (Int32) -> Void
     ) {
         var env = environment(for: bottle)
@@ -1124,15 +1084,22 @@ final class BottleStore: ObservableObject {
             process.arguments = args
             process.environment = env
             process.currentDirectoryURL = workingDirectory
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
+            var logHandle: FileHandle?
+            if let logURL, FileManager.default.createFile(atPath: logURL.path, contents: nil) {
+                logHandle = try? FileHandle(forWritingTo: logURL)
+            }
+            process.standardOutput = logHandle ?? FileHandle.nullDevice
+            process.standardError = logHandle ?? FileHandle.nullDevice
+            defer { try? logHandle?.close() }
             do {
                 try process.run()
+                DispatchQueue.main.async { didStart?() }
                 process.waitUntilExit()
                 let code = process.terminationStatus
                 DispatchQueue.main.async { completion(code) }
             } catch {
                 DispatchQueue.main.async {
+                    self.gameMonitors.removeValue(forKey: bottle.id)?.cancel()
                     self.status = "Erro: \(error.localizedDescription)"
                     self.busy = false
                 }
@@ -1277,11 +1244,9 @@ struct BottleDetail: View {
                     Text(bottle.name).font(.largeTitle.bold())
                     Text("\(bottle.renderer.rawValue) — \(bottle.renderer.detail)")
                         .foregroundStyle(.secondary)
-                    if bottle.renderer == .dxmt {
-                        Label("Modo Auto com Laya", systemImage: "sparkles")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    Label("Compatibilidade automática por jogo", systemImage: "sparkles")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 HStack(spacing: 12) {
@@ -1298,9 +1263,12 @@ struct BottleDetail: View {
                     LabeledContent("Renderer", value: bottle.renderer.rawValue)
                     LabeledContent(
                         "Perfil de jogo",
-                        value: bottle.renderer == .dxmt ? "Auto por jogo · Laya" : "Manual"
+                        value: "Auto por API · histórico de falhas"
                     )
                     LabeledContent("Prefixo", value: bottle.id.uuidString)
+                    Button("Redefinir perfis de compatibilidade") {
+                        store.resetCompatibility(in: bottle)
+                    }
                 }
 
                 Button("Excluir bottle", role: .destructive) {
@@ -1355,7 +1323,7 @@ struct BottleDetail: View {
                                         .foregroundStyle(.primary)
                                     Text(
                                         app.id.hasPrefix("steam:") && bottle.renderer == .dxmt
-                                            ? "\(app.detail) · Auto Laya"
+                                            ? "\(app.detail) · Auto por API"
                                             : app.detail
                                     )
                                         .font(.caption)

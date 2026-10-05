@@ -60,7 +60,7 @@ O modo Auto usa detecção local e não exige baixar um modelo. Sugestões Laya 
 
 ## Seleção e limites de compatibilidade
 
-No Elden Ring, o requisito D3D12 prevalece sobre imports mistos de DLLs. Se a bottle estiver encerrada, a primeira abertura prepara a Steam com o mesmo perfil; aguarde o login e abra o jogo novamente pela lista do BottleForge. O modo offline do jogo ainda precisa do cliente Steam da mesma bottle em execução. Se ele encerrar imediatamente, a tentativa não é gravada como perfil bem-sucedido. Use **Abrir logs de execução** para ver o comando, a configuração gráfica, a duração e o código de saída.
+No Elden Ring, o requisito D3D12 prevalece sobre imports mistos de DLLs. O modo offline precisa do cliente Steam da mesma bottle em execução. Você pode abrir a Steam, entrar na conta e abrir o jogo pela lista do BottleForge mantendo a Steam aberta. O cliente usa seu perfil gráfico normal e o jogo recebe o perfil DirectX 12; ambos compartilham a engine e o MSync. Se a Steam estiver fechada, a primeira abertura inicia o cliente e verifica se `Steam.exe` apareceu antes de orientar o login e a nova abertura do jogo. Essa verificação confirma o processo, não a autenticação. Se o cliente não iniciar, o app mostra a falha com referência ao log. Se o jogo encerrar imediatamente, a tentativa não é gravada como perfil bem-sucedido. Use **Abrir logs de execução** para ver o comando, a configuração gráfica, a duração e o código de saída.
 
 Os requisitos D3D12 estão na [página oficial do Elden Ring](https://en.bandainamcoent.eu/elden-ring/elden-ring), e a dependência do cliente Steam está na [documentação de inicialização do Steamworks](https://partner.steamgames.com/doc/sdk/api#initialization_and_shutdown).
 

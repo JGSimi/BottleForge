@@ -38,9 +38,18 @@ struct LauncherTests {
         // Disposable subprocesses model the Steam/Wine boundary; no actual game, user data or engine.
         try script("""
         #!/bin/zsh
+        if [[ "$1" == tasklist.exe ]]; then
+          if [[ -e "$WINEPREFIX/steam-running" ]]; then
+            print '\"steam.exe\",\"42\",\"Console\",\"1\",\"10 K\"'
+          fi
+          exit 0
+        fi
         if [[ "$1" == *Steam.exe ]]; then
-          /usr/bin/touch "$WINEPREFIX/steam-running"
+          if [[ ! -e "$WINEPREFIX/fail-steam" ]]; then
+            /usr/bin/touch "$WINEPREFIX/steam-running"
+          fi
           print 'STEAM_CLIENT_FIXTURE'
+          print "CLIENT_OVERRIDES=$WINEDLLOVERRIDES"
         else
           print 'GAME_EARLY_EXIT_FIXTURE'
           print "SteamAppId=$SteamAppId"
@@ -50,20 +59,33 @@ struct LauncherTests {
         """, at: engine.appendingPathComponent("wine"))
         try script("""
         #!/bin/zsh
-        if [[ "$1" == '-w' && -e "$WINEPREFIX/steam-running" ]]; then
+        if [[ "$1" == '-w' && ( -e "$WINEPREFIX/steam-running" || -e "$WINEPREFIX/helper-running" ) ]]; then
           exec /bin/sleep 2
         fi
         exit 0
         """, at: engine.appendingPathComponent("wineserver"))
-        let store = BottleStore()
+        let store = BottleStore(steamStartupTimeout: 1)
         let app = InstalledApp(id: "steam:1245620", name: "Elden Ring", detail: "Offline", icon: "",
                                executable: steam.appendingPathComponent("Steam.exe"), arguments: ["-applaunch", "1245620"],
                                gameDirectory: gameDir.deletingLastPathComponent())
+        let steamApp = InstalledApp(id: "steam", name: "Steam", detail: "Launcher", icon: "",
+                                    executable: steam.appendingPathComponent("Steam.exe"), arguments: [])
+        store.runInstalledApp(steamApp, in: bottle)
+        try await wait("Regular Steam launch", diagnostic: { store.status + "\n" + logs(root) }) {
+            logs(root).contains("STEAM_CLIENT_FIXTURE") && store.status == "Steam finalizado"
+        }
+        store.runInstalledApp(app, in: bottle)
+        try await wait("D3D12 game with regular Steam already open", diagnostic: { store.status + "\n" + logs(root) }) {
+            store.status.contains("abertura não confirmada")
+        }
+        try fm.removeItem(at: prefix.appendingPathComponent("steam-running"))
+        for file in try fm.contentsOfDirectory(at: root.appendingPathComponent("Logs"), includingPropertiesForKeys: nil) { try fm.removeItem(at: file) }
         store.runInstalledApp(app, in: bottle)
         try await wait("Steam preparation", diagnostic: { store.status + "\n" + logs(root) }) {
-            logs(root).contains("STEAM_CLIENT_FIXTURE") && store.status.contains("Aguarde o login")
+            logs(root).contains("STEAM_CLIENT_FIXTURE") && store.status.contains("Steam em execução")
         }
         check(!logs(root).contains("GAME_EARLY_EXIT_FIXTURE"), "Cold launch must prepare Steam before running the offline game")
+        check(logs(root).contains("CLIENT_OVERRIDES=dxgi,d3d11,d3d10core,winemetal=builtin;d3d12,d3d12core="), "Steam must use its client renderer rather than the game's native D3D12 DXGI")
         check(try String(contentsOf: prefix.appendingPathComponent("drive_c/windows/system32/d3d12.dll"), encoding: .utf8) == "runtime fixture", "D3D12 must be installed before Steam starts")
         store.runInstalledApp(app, in: bottle)
         try await wait("Early game exit", diagnostic: { store.status + "\n" + logs(root) }) { store.status.contains("abertura não confirmada") }
@@ -73,11 +95,36 @@ struct LauncherTests {
         check(output.contains("Code: 0") && output.contains("Elapsed seconds:") && output.contains("Working directory:"), "Diagnostics must preserve command, timing and exit code")
         let historyFiles = (fm.enumerator(at: root.appendingPathComponent("Compatibility"), includingPropertiesForKeys: nil)?.allObjects as? [URL]) ?? []
         check(!historyFiles.contains { $0.pathExtension == "json" }, "An immediate zero exit must not persist a successful profile")
+        let reopened = BottleStore(steamStartupTimeout: 1)
+        reopened.runInstalledApp(app, in: bottle)
+        try await wait("Reopened BottleForge with live Steam", diagnostic: { reopened.status }) { reopened.status.contains("abertura não confirmada") }
         try fm.removeItem(at: prefix.appendingPathComponent("steam-running"))
+        try Data().write(to: prefix.appendingPathComponent("helper-running"))
+        store.runInstalledApp(app, in: bottle)
+        try await wait("Background Wine helper without Steam", diagnostic: { store.status }) { store.status.contains("Steam em execução") }
+        try fm.removeItem(at: prefix.appendingPathComponent("steam-running"))
+        try Data().write(to: prefix.appendingPathComponent("fail-steam"))
+        store.runInstalledApp(app, in: bottle)
+        try await wait("Steam exits zero without client", diagnostic: { store.status }) { store.status.contains("Steam não iniciou") }
+        check(!store.status.contains("login"), "A clean launcher exit without Steam must never claim login is ready")
+        try fm.removeItem(at: prefix.appendingPathComponent("fail-steam"))
         try fm.removeItem(at: cef.appendingPathComponent("steamwebhelper_real.exe"))
         store.runInstalledApp(app, in: bottle)
         try await wait("Missing Steam helper", diagnostic: { store.status + "\n" + logs(root) }) { store.status.contains("Não foi possível preparar a interface da Steam") }
         check(!store.status.contains("Steam iniciada"), "Steam preparation failure must not be overwritten by a success message")
+        check(SteamClientProbe.containsSteam(Data("\"Steam.exe\",\"42\",\"Console\"\r\n".utf8)), "Parse actual CSV process names case-insensitively")
+        check(SteamClientProbe.containsSteam("\"steam.exe\",\"42\"".data(using: .utf16LittleEndian)!), "Accept Wine's UTF-16 redirected output")
+        check(!SteamClientProbe.containsSteam(Data("\"steamwebhelper.exe\",\"42\"\nerror: steam.exe not found".utf8)), "A helper or error mentioning Steam cannot establish readiness")
+        let hungProbe = root.appendingPathComponent("hung-probe")
+        try script("#!/bin/zsh\nexec /bin/sleep 30\n", at: hungProbe)
+        let start = ProcessInfo.processInfo.systemUptime
+        let timedOut = SteamClientProbe.inspect(wine: hungProbe, environment: [:], timeout: 0.1, token: GameMonitorToken())
+        if case .unavailable(let reason) = timedOut { check(reason.contains("tempo limite"), "Report a stalled process probe") }
+        else { fatalError("A stalled probe cannot establish Steam readiness") }
+        check(ProcessInfo.processInfo.systemUptime - start < 3, "Probe timeout must terminate and reap only its own subprocess promptly")
+        let cancelled = GameMonitorToken()
+        cancelled.cancel()
+        check(SteamClientProbe.inspect(wine: hungProbe, environment: [:], token: cancelled) == .unavailable("verificação cancelada"), "Cancelled attempts must not start another probe")
         print("Launcher subprocess tests passed")
     }
 

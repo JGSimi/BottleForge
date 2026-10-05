@@ -199,6 +199,16 @@ enum DirectGameExit: Equatable {
 }
 
 extension LayaGameProfile.Kind {
+    var msyncEnabled: Bool {
+        self == .dxmtMSync || self == .dxmtMSyncForceD3D11 || self == .vkd3dMSync || self == .wineD3DMSync
+    }
+    func sharesWineServer(with other: Self) -> Bool {
+        renderer == other.renderer && msyncEnabled == other.msyncEnabled
+    }
+    var steamClientKind: Self {
+        renderer == .dxmt ? (msyncEnabled ? .dxmtMSync : .dxmtStandard)
+            : (msyncEnabled ? .wineD3DMSync : .wineD3DStandard)
+    }
     var renderer: Renderer {
         self == .wineD3DStandard || self == .wineD3DMSync ? .wineD3D : .dxmt
     }
@@ -296,6 +306,12 @@ struct CompatibilityAttempt {
 }
 
 enum D3D12RuntimeInstaller {
+    static func isInstalled(runtime: URL, prefix: URL) -> Bool {
+        ["dxgi.dll", "d3d12.dll", "d3d12core.dll"].allSatisfy { name in
+            FileManager.default.contentsEqual(atPath: runtime.appendingPathComponent(name).path,
+                                              andPath: prefix.appendingPathComponent("drive_c/windows/system32/" + name).path)
+        }
+    }
     static func install(runtime: URL, prefix: URL) throws {
         let fm = FileManager.default
         let names = ["dxgi.dll", "d3d12.dll", "d3d12core.dll"]

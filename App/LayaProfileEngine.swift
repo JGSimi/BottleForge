@@ -21,7 +21,7 @@ struct LayaGameProfile: Codable, Hashable {
     var createdAt: Date
 
     var msync: Bool {
-        kind == .dxmtMSync || kind == .dxmtMSyncForceD3D11 || kind == .vkd3dMSync || kind == .wineD3DMSync
+        kind.msyncEnabled
     }
 
     var usesD3D12: Bool {

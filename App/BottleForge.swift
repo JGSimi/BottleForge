@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Foundation
+import Darwin
 
 struct Bottle: Codable, Identifiable, Hashable {
     var id: UUID
@@ -216,6 +217,7 @@ final class BottleStore: ObservableObject {
     @Published var rosettaRequired = false
     @Published var rosettaInstalling = false
     private let fm = FileManager.default
+    private let steamStartupTimeout: TimeInterval
     private var supportRoot: URL {
         if let override = ProcessInfo.processInfo.environment["BOTTLEFORGE_SUPPORT_ROOT"], !override.isEmpty {
             return URL(fileURLWithPath: override, isDirectory: true)
@@ -249,7 +251,8 @@ final class BottleStore: ObservableObject {
         renderer == .dxmt ? dxmtEngineRoot : wineD3DEngineRoot
     }
 
-    init() {
+    init(steamStartupTimeout: TimeInterval = 60) {
+        self.steamStartupTimeout = steamStartupTimeout
         try? fm.createDirectory(at: bottlesRoot, withIntermediateDirectories: true)
         try? fm.createDirectory(at: logsRoot, withIntermediateDirectories: true)
         clearStaleSteamBootstrapGuards()
@@ -526,39 +529,112 @@ final class BottleStore: ObservableObject {
         var effectiveBottle = bottle
         effectiveBottle.renderer = kind.renderer
         let running = wineSessionIsRunning(in: bottle)
-        if running && sessionProfiles[bottle.id] != kind {
-            status = "Encerre os processos Wine desta bottle antes de aplicar o novo perfil de \(displayName)"
+        let configured: LayaGameProfile.Kind = bottle.renderer == .dxmt
+            ? (bottle.msync ? .dxmtMSync : .dxmtStandard) : (bottle.msync ? .wineD3DMSync : .wineD3DStandard)
+        if running && !(sessionProfiles[bottle.id] ?? configured).sharesWineServer(with: kind) {
+            status = "Encerre os processos Wine desta bottle para trocar a engine ou o MSync de \(displayName)"
             return
         }
         if !running { sessionProfiles[bottle.id] = nil }
         let profile = LayaGameProfile(appID: steamAppID ?? gameKey, gameName: displayName, kind: kind,
                                       probabilities: [:], confidence: nil, createdAt: Date())
-        if profile.usesD3D12 && !running && !prepareD3D12Runtime(in: effectiveBottle) {
-            status = "Não foi possível preparar o runtime DirectX 12"
-            return
-        }
-        // A direct Steamworks game still needs the Windows Steam client in this same prefix.
-        // Let the user finish login before attempting the offline executable.
-        if offline && !running {
-            guard let steam = installedApps(in: bottle).first(where: { $0.id == "steam" }),
-                  let wine = wineURL(for: effectiveBottle.renderer) else {
-                status = "Abra a Steam desta bottle e entre na conta antes de iniciar o jogo offline"
+        if profile.usesD3D12 && !D3D12RuntimeInstaller.isInstalled(runtime: d3d12RuntimeRoot, prefix: prefixURL(bottle)) {
+            guard !running else {
+                status = "O runtime DirectX 12 precisa ser atualizado. Use Encerrar uma vez e abra o jogo novamente"
                 return
             }
-            sessionProfiles[bottle.id] = kind
-            if launchSteam(steam.executable, arguments: [], displayName: "Steam", wine: wine,
-                           bottle: effectiveBottle, profile: profile, attempt: nil, monitorToken: nil) {
-                status = "Steam iniciada com \(profile.displayName). Aguarde o login e abra \(displayName) novamente"
+            guard prepareD3D12Runtime(in: effectiveBottle) else {
+                status = "Não foi possível preparar o runtime DirectX 12"
+                return
             }
-            return
         }
         let token = GameMonitorToken()
         gameMonitors[bottle.id] = token
         sessionProfiles[bottle.id] = kind
         let attempt = CompatibilityAttempt(key: key, fingerprint: fingerprint, profile: profile)
+        if offline {
+            prepareOfflineSteam(executable, arguments: arguments, displayName: displayName,
+                                bottle: effectiveBottle, profile: profile, attempt: attempt, token: token)
+            return
+        }
         launch(executable, arguments: arguments, displayName: displayName, in: effectiveBottle,
                profile: profile, attempt: attempt, monitorToken: token,
                steamAppID: steamAppID, offline: offline)
+    }
+
+    private func prepareOfflineSteam(_ executable: URL, arguments: [String], displayName: String,
+                                     bottle: Bottle, profile: LayaGameProfile, attempt: CompatibilityAttempt,
+                                     token: GameMonitorToken) {
+        guard let wine = wineURL(for: bottle.renderer),
+              let steam = installedApps(in: bottle).first(where: { $0.id == "steam" }) else {
+            gameMonitors[bottle.id] = nil
+            status = "Steam não encontrada nesta bottle"
+            return
+        }
+        var clientProfile = profile
+        clientProfile.kind = profile.kind.steamClientKind
+        var clientEnvironment = environment(for: bottle)
+        clientEnvironment.merge(profileEnvironment(clientProfile), uniquingKeysWith: { _, new in new })
+        let probeEnvironment = clientEnvironment
+        status = "Verificando a Steam desta bottle…"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let state = SteamClientProbe.inspect(wine: wine, environment: probeEnvironment, token: token)
+            DispatchQueue.main.async {
+                guard let self, !token.isCancelled else { return }
+                switch state {
+                case .running:
+                    self.launch(executable, arguments: arguments, displayName: displayName, in: bottle,
+                                profile: profile, attempt: attempt, monitorToken: token,
+                                steamAppID: profile.appID, offline: true)
+                case .stopped:
+                    let log = self.processDiagnosticURL(in: bottle)
+                    if self.launchSteam(steam.executable, arguments: [], displayName: "Steam", wine: wine,
+                                        bottle: bottle, profile: clientProfile, attempt: nil, monitorToken: token, logURL: log) {
+                        self.waitForSteamClient(wine: wine, environment: probeEnvironment, bottle: bottle,
+                                                token: token, log: log)
+                    } else { self.gameMonitors[bottle.id] = nil }
+                case .unavailable(let reason):
+                    self.gameMonitors[bottle.id] = nil
+                    self.status = "Não foi possível verificar a Steam: \(reason). Use Encerrar e tente novamente"
+                }
+            }
+        }
+    }
+
+    private func waitForSteamClient(wine: URL, environment: [String: String], bottle: Bottle,
+                                   token: GameMonitorToken, log: URL) {
+        let timeout = steamStartupTimeout
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let deadline = ProcessInfo.processInfo.systemUptime + timeout
+            var lastState = SteamClientState.stopped
+            repeat {
+                if token.isCancelled { return }
+                lastState = SteamClientProbe.inspect(wine: wine, environment: environment,
+                                                     timeout: min(8, max(0.1, timeout)), token: token)
+                if lastState == .running { break }
+                Thread.sleep(forTimeInterval: min(1, max(0.01, timeout / 10)))
+            } while ProcessInfo.processInfo.systemUptime < deadline
+            guard !token.isCancelled else { return }
+            let result = lastState
+            DispatchQueue.main.async {
+                guard let self, !token.isCancelled else { return }
+                self.gameMonitors[bottle.id] = nil
+                if result == .running {
+                    self.status = "Steam em execução. Conclua o login e abra o jogo offline novamente"
+                } else {
+                    let reason: String
+                    if case .unavailable(let details) = result { reason = details }
+                    else { reason = "o processo Steam.exe não apareceu" }
+                    let message = "Steam não iniciou: \(reason) · consulte \(log.lastPathComponent)"
+                    if let handle = try? FileHandle(forWritingTo: log) {
+                        _ = try? handle.seekToEnd()
+                        try? handle.write(contentsOf: Data("\nSteam verification: \(reason)\n".utf8))
+                        try? handle.close()
+                    }
+                    self.status = message
+                }
+            }
+        }
     }
 
     private var d3d12RuntimeAvailable: Bool {
@@ -576,7 +652,7 @@ final class BottleStore: ObservableObject {
             return "\(url.path):\(values?.fileSize ?? 0):\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
         }
         let release = Bundle.main.object(forInfoDictionaryKey: "BottleForgeReleaseTag") as? String ?? "development"
-        return (["policy-2", release, bottle.renderer.rawValue, String(bottle.msync), evidence.fingerprint] + stamps).joined(separator: "|")
+        return (["policy-3", release, bottle.renderer.rawValue, String(bottle.msync), evidence.fingerprint] + stamps).joined(separator: "|")
     }
 
     // `wineserver -w` only waits for the prefix server; cancelling this probe does not kill games.
@@ -780,11 +856,12 @@ final class BottleStore: ObservableObject {
     @discardableResult
     private func launchSteam(
         _ executable: URL, arguments: [String], displayName: String, wine: URL,
-        bottle: Bottle, profile: LayaGameProfile?, attempt: CompatibilityAttempt?, monitorToken: GameMonitorToken?
+        bottle: Bottle, profile: LayaGameProfile?, attempt: CompatibilityAttempt?, monitorToken: GameMonitorToken?,
+        logURL: URL? = nil
     ) -> Bool {
         let isGame = arguments.contains("-applaunch")
         if !isGame {
-            guard gameMonitors[bottle.id] == nil else {
+            guard gameMonitors[bottle.id] == nil || (monitorToken != nil && gameMonitors[bottle.id] === monitorToken) else {
                 status = "Encerre o jogo antes de reiniciar a Steam"
                 return false
             }
@@ -793,11 +870,17 @@ final class BottleStore: ObservableObject {
                 ? (bottle.msync ? .dxmtMSync : .dxmtStandard)
                 : (bottle.msync ? .wineD3DMSync : .wineD3DStandard))
             if wineSessionIsRunning(in: bottle) {
-                if let current = sessionProfiles[bottle.id], current.renderer != bottle.renderer {
-                    status = "Encerre os processos Wine antes de abrir a Steam com outro renderer"
+                if let current = sessionProfiles[bottle.id], !current.sharesWineServer(with: expected) {
+                    status = "Encerre os processos Wine antes de trocar a engine ou o MSync da Steam"
                     return false
                 }
             } else {
+                // Prepare while the prefix is idle; direct D3D12 games can then join a normal Steam session.
+                if d3d12RuntimeAvailable && !D3D12RuntimeInstaller.isInstalled(runtime: d3d12RuntimeRoot, prefix: prefixURL(bottle)),
+                   !prepareD3D12Runtime(in: bottle) {
+                    status = "Não foi possível preparar o runtime DirectX 12"
+                    return false
+                }
                 sessionProfiles[bottle.id] = expected
             }
         }
@@ -808,7 +891,7 @@ final class BottleStore: ObservableObject {
         }
         let processLog = executable.deletingLastPathComponent().appendingPathComponent("logs/gameprocess_log.txt")
         let baseline = (try? processLog.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-        let log = processDiagnosticURL(in: bottle)
+        let log = logURL ?? processDiagnosticURL(in: bottle)
         status = "Abrindo \(displayName) · \(profile?.displayName ?? bottle.renderer.rawValue)…"
         runProcess(wine, args: [executable.path] + GameCompatibility.steamArguments(arguments, profile: profile?.kind),
                    bottle: bottle, environmentOverrides: profileEnvironment(profile),
@@ -827,9 +910,10 @@ final class BottleStore: ObservableObject {
                     self.status = "Steam saiu com código \(code) · consulte \(log.lastPathComponent)"
                 }
             } else {
-                self.status = code == 0
-                    ? (profile != nil ? "Steam preparada. Aguarde o login e abra o jogo offline novamente" : "Steam finalizado")
-                    : "Steam saiu com código \(code) · consulte \(log.lastPathComponent)"
+                // The readiness probe owns the offline startup status; exit zero is not readiness.
+                if monitorToken == nil {
+                    self.status = code == 0 ? "Steam finalizado" : "Steam saiu com código \(code) · consulte \(log.lastPathComponent)"
+                }
             }
         }
         scheduleSteamBootstrapGuardRemoval(in: bottle)
@@ -1125,6 +1209,11 @@ final class BottleStore: ObservableObject {
             var logHandle: FileHandle?
             if let logURL, FileManager.default.createFile(atPath: logURL.path, contents: nil) {
                 logHandle = try? FileHandle(forWritingTo: logURL)
+                if let logHandle {
+                    // Readiness diagnostics may append while the client is still writing.
+                    let flags = fcntl(logHandle.fileDescriptor, F_GETFL)
+                    if flags >= 0 { _ = fcntl(logHandle.fileDescriptor, F_SETFL, flags | O_APPEND) }
+                }
             }
             let settings = ["WINEPREFIX", "WINEDLLOVERRIDES", "WINEMSYNC", "SteamAppId", "VK_ICD_FILENAMES"]
                 .compactMap { key in env[key].map { "\(key)=\($0)" } }.joined(separator: "\n")

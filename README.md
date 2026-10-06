@@ -82,6 +82,10 @@ mkdir -p build
 xcrun swiftc -parse-as-library -target arm64-apple-macos14.0 App/*.swift -o build/BottleForge
 ```
 
+## Logs de execução
+
+O botão **Logs de execução** fica na barra inferior da janela principal, mesmo sem uma bottle selecionada. Ele permite abrir a pasta, consultar o último log e **Exportar diagnóstico…** para salvar um arquivo de texto com a versão do BottleForge, o modelo do Mac, o macOS e o log da última abertura na bottle selecionada. Depois de reproduzir uma falha, envie esse arquivo para análise. Logs grandes são limitados às últimas 2 MiB; o arquivo original continua disponível na pasta.
+
 ## Releases e atualização
 
 O app verifica automaticamente novas GitHub Releases. O processo de deploy

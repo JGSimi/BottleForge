@@ -1094,6 +1094,24 @@ final class BottleStore: ObservableObject {
         NSWorkspace.shared.open(logsRoot)
     }
 
+    func latestExecutionLog(in bottle: Bottle?) -> URL? {
+        ExecutionDiagnostics.latestLog(in: logsRoot, bottleID: bottle?.id)
+    }
+
+    func exportExecutionDiagnostics(in bottle: Bottle?) throws -> URL? {
+        let log = latestExecutionLog(in: bottle)
+        let panel = NSSavePanel()
+        panel.title = "Exportar diagnóstico"
+        panel.nameFieldStringValue = "BottleForge-diagnostico.txt"
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let destination = panel.url else { return nil }
+        let release = Bundle.main.object(forInfoDictionaryKey: "BottleForgeReleaseTag") as? String ?? "development"
+        let description = bottle.map { "\($0.name) · \($0.renderer.rawValue) · MSync \($0.msync ? "ON" : "OFF")" } ?? "Todas"
+        let report = try ExecutionDiagnostics.report(log: log, release: release, bottleDescription: description)
+        try report.write(to: destination, atomically: true, encoding: .utf8)
+        return destination
+    }
+
     func delete(_ bottle: Bottle) {
         gameMonitors.removeValue(forKey: bottle.id)?.cancel()
         sessionProfiles[bottle.id] = nil
@@ -1249,6 +1267,7 @@ struct ContentView: View {
     @EnvironmentObject private var updater: UpdateManager
     @State private var showingCreate = false
     @State private var showingUpdate = false
+    @State private var showingLogs = false
     @State private var selectedBottle: Bottle?
 
     var body: some View {
@@ -1295,6 +1314,10 @@ struct ContentView: View {
             UpdateView()
                 .environmentObject(updater)
         }
+        .sheet(isPresented: $showingLogs) {
+            ExecutionLogsView(bottle: selectedBottle)
+                .environmentObject(store)
+        }
         .alert("Componente de compatibilidade necessário", isPresented: $store.rosettaRequired) {
             Button("Instalar Rosetta 2") {
                 store.installRosetta()
@@ -1336,8 +1359,15 @@ struct ContentView: View {
                 Circle()
                     .fill(store.busy ? Color.orange : Color.green)
                     .frame(width: 8, height: 8)
-                Text(store.status).font(.caption)
+                Text(store.status).font(.caption).lineLimit(1).help(store.status)
                 Spacer()
+                Button {
+                    showingLogs = true
+                } label: {
+                    Label("Logs de execução", systemImage: "doc.text.magnifyingglass")
+                }
+                .help("Abrir logs e exportar o diagnóstico de uma falha")
+                .fixedSize(horizontal: true, vertical: false)
                 if let update = updater.availableUpdate {
                     Button("\(update.tag) disponível") {
                         showingUpdate = true
@@ -1366,6 +1396,46 @@ struct ContentView: View {
             .background(.bar)
         }
         .frame(minWidth: 820, minHeight: 520)
+    }
+}
+
+struct ExecutionLogsView: View {
+    @EnvironmentObject private var store: BottleStore
+    @Environment(\.dismiss) private var dismiss
+    let bottle: Bottle?
+    @State private var latestLog: URL?
+    @State private var feedback = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Logs de execução").font(.title2.bold())
+            Text("Após uma falha, exporte o diagnóstico e envie o arquivo para análise. Ele inclui o último log, a versão do app e informações do Mac.")
+                .foregroundStyle(.secondary)
+            Text(bottle.map { "Bottle: \($0.name)" } ?? "Última execução entre todas as bottles")
+            if let latestLog {
+                Text(latestLog.lastPathComponent).font(.caption).textSelection(.enabled)
+                Button("Abrir último log") { NSWorkspace.shared.open(latestLog) }
+            } else {
+                Text("Nenhum log encontrado. Tente abrir o jogo e volte aqui para exportar o diagnóstico.")
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                Button("Abrir pasta de logs") { store.revealExecutionLogs() }
+                Button("Exportar diagnóstico…") {
+                    do {
+                        if let saved = try store.exportExecutionDiagnostics(in: bottle) {
+                            feedback = "Diagnóstico salvo em \(saved.path)"
+                        }
+                    } catch { feedback = "Não foi possível exportar: \(error.localizedDescription)" }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            if !feedback.isEmpty { Text(feedback).font(.caption).textSelection(.enabled) }
+            HStack { Spacer(); Button("Fechar") { dismiss() }.keyboardShortcut(.cancelAction) }
+        }
+        .padding(24)
+        .frame(width: 560)
+        .onAppear { latestLog = store.latestExecutionLog(in: bottle) }
     }
 }
 
@@ -1406,7 +1476,7 @@ struct BottleDetail: View {
                     Button("Redefinir perfis de compatibilidade") {
                         store.resetCompatibility(in: bottle)
                     }
-                    Button("Abrir logs de execução") { store.revealExecutionLogs() }
+                    Button("Abrir pasta de logs") { store.revealExecutionLogs() }
                 }
 
                 Button("Excluir bottle", role: .destructive) {
